@@ -6,7 +6,7 @@ from random import randint
 from typing import Callable, Optional, Any, Iterable, Union
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from .api import IntercomAPI
+from .api import IntercomAPI, _generate_device_token
 from .const import (
     EVENT_INCOMING_CALL,
     WS_MESSAGE_END,
@@ -59,15 +59,17 @@ class IntercomNotifyConsumer:
                 if e.status == 401:
                     _LOGGER.error("WS 401 Unauthorized: %s", e.headers.get("WWW-Authenticate"))
                 elif e.status == 404:
-                    _LOGGER.debug("WS 404 Not found")
+                    _LOGGER.warning("WS 404 Not found")
                 else:
-                    _LOGGER.debug("WS handshake error: %s", e)
+                    _LOGGER.warning("WS handshake error: status=%s %s", e.status, e)
             except Exception as e:
-                _LOGGER.debug("Notify loop error: %s", e)
+                _LOGGER.warning("Notify loop error: %s: %s", type(e).__name__, e)
             if self._stop_event.is_set():
                 break
-            await asyncio.sleep(self._reconnect_delay)
-            self._reconnect_delay = randint(self._reconnect_delay, self._max_reconnect)
+            delay = self._reconnect_delay
+            _LOGGER.info("WS loop ended, reconnecting in %d seconds...", delay)
+            await asyncio.sleep(delay)
+            self._reconnect_delay = max(1, randint(delay, self._max_reconnect))
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -96,24 +98,46 @@ class IntercomNotifyConsumer:
         self._headers["Authorization"] = f"Bearer {access or ''}"
 
     async def _connect_and_run(self) -> None:
-        self._notify_id_token = await self._api.get_notify_id_token()
-        _LOGGER.debug("Negotiated connectionToken: %s", self._notify_id_token)
-        if not self._notify_id_token:
-            raise RuntimeError("Negotiation failed: empty connectionToken")
-        ws_url = WS_URL + self._notify_id_token
+        # Перед каждым подключением регистрируем свежий device_token: сервер
+        # привязывает доставку пушей к последнему зарегистрированному токену,
+        # и без перерегистрации уведомления перестают приходить.
+        self._api.device_token = _generate_device_token()
+        _LOGGER.info("New device_token: %s", self._api.device_token)
+        _LOGGER.info("Registering device token before WS connect...")
+        try:
+            ok = await self._api.update_device_token(self._api.device_token)
+            _LOGGER.info("update_device_token result: %s", ok)
+        except Exception:
+            _LOGGER.warning("update_device_token failed", exc_info=True)
+
+        negotiate = await self._api.get_notify_id_token()
+        if not negotiate or not negotiate.get("connectionToken"):
+            raise RuntimeError("Negotiation failed: no connectionToken")
+        conn_token = negotiate["connectionToken"]
+        _LOGGER.debug("Negotiated connectionToken: %s", conn_token)
+
+        ws_url = WS_URL + conn_token
         self._headers = dict(self._api.signalr_headers())
         self._headers["Authorization"] = f"Bearer {self._api.access_token or ''}"
+        self._headers["Sec-WebSocket-Protocol"] = "json"
+
+        await self._ws_connect_and_listen(ws_url)
+
+    async def _ws_connect_and_listen(self, ws_url: str) -> None:
         # receive_timeout = serverTimeout клиента Microsoft SignalR: если за 30с не
         # пришло ни одного сообщения (сервер шлёт свои ping ~каждые 15с), считаем
         # соединение мёртвым — receive() бросит TimeoutError, цикл прервётся и
         # произойдёт переподключение. WS control-ping'и не используем, как и клиент.
         ping_task: Optional[asyncio.Task] = None
+        # Отдельная сессия под каждое WS-подключение: у общей сессии HA свой
+        # набор заголовков/настроек TLS, а хабу нужны ровно наши заголовки.
+        ws_session = aiohttp.ClientSession()
         try:
-            async with self._session.ws_connect(
-                ws_url, headers=self._headers, receive_timeout=WS_SERVER_TIMEOUT
+            async with ws_session.ws_connect(
+                ws_url, headers=self._headers, receive_timeout=WS_SERVER_TIMEOUT, ssl=False
             ) as ws:
                 self._ws = ws
-                _LOGGER.debug("WS connected")
+                _LOGGER.info("WS connected to %s", ws_url)
                 self._connected = True
                 self._reconnect_delay = 1
                 self._username = await self._api.get_username()
@@ -138,12 +162,13 @@ class IntercomNotifyConsumer:
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError):
             # serverTimeout: сервер молчит дольше WS_SERVER_TIMEOUT — штатный
             # признак мёртвого соединения, переподключаемся (не ошибка).
-            _LOGGER.debug("WS server timeout, reconnecting")
+            _LOGGER.warning("WS server timeout, reconnecting")
         finally:
             self._connected = False
             self._username = ""
             self._ws = None
-            _LOGGER.debug("WS disconnected")
+            await ws_session.close()
+            _LOGGER.info("WS disconnected")
 
     async def _keepalive(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         """Периодически шлёт SignalR ping (`{"type":6}`).
@@ -205,7 +230,13 @@ class IntercomNotifyConsumer:
                 if evt == "DomofonCalling":
                     await self._prepare_incoming_call_event(push_data)
                     self._hass.bus.fire(EVENT_INCOMING_CALL, push_data)
-                    _LOGGER.debug("Incoming call: %s", push_data)
+                    _LOGGER.info("Incoming call fired: DoorId=%s CallId=%s", push_data.get("DoorId"), push_data.get("CallId"))
+                elif evt == "DomofonCallEnded":
+                    # После завершения звонка сервер перестаёт слать пуши в это
+                    # соединение — переподключаемся, чтобы поймать следующий звонок.
+                    _LOGGER.info("Call ended, forcing WS reconnect for next call")
+                    if self._ws is not None and not self._ws.closed:
+                        await self._ws.close()
                 else:
                     _LOGGER.debug("Unknown EventMessage=%s push=%s", evt, str(push_data)[:200])
         elif target in ('ReceiveOnline', "ReceiveOffline"):

@@ -728,7 +728,7 @@ class IntercomAPI:
         _LOGGER.debug("end_call_notify(%s) -> %s", call_id, res)
         return {"ok": True, "body": res}
 
-    async def get_notify_id_token(self) -> Optional[str]:
+    async def get_notify_id_token(self) -> Optional[dict]:
         res = await self._post(
             "/notificationHub/negotiate?negotiateVersion=1",
             need_auth=True,
@@ -738,6 +738,7 @@ class IntercomAPI:
         if isinstance(res, dict) and "error" in res and "status" in res:
             _LOGGER.debug("negotiate failed: %s", res)
             return None
-        token = res.get("connectionToken")
-        _LOGGER.debug("get_notify_id_token -> %s", token)
-        return token
+        return {
+            "connectionId": res.get("connectionId"),
+            "connectionToken": res.get("connectionToken"),
+        }
