@@ -54,7 +54,13 @@ class AospApiContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("device-info", headers)
         self.assertNotIn("Authorization", headers)
 
-    async def test_sms_confirm_sends_null_device_token_and_stores_auth(self):
+    def test_device_info_uses_analyzed_aosp_release(self):
+        api = AospIntercomAPI(instance_id="0123456789abcdef")
+        self.assertIn('"InstanceId":"0123456789abcdef"', api.headers["device-info"])
+        self.assertIn('"versionCode":"9845"', api.headers["device-info"])
+        self.assertIn('"versionName":"9845"', api.headers["device-info"])
+
+    async def test_sms_confirm_omits_push_device_token_and_stores_auth(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
         calls = []
 
@@ -75,9 +81,26 @@ class AospApiContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 1)
         path, payload, kwargs = calls[0]
         self.assertEqual(path, "/sso-api/Authorization/ConfirmAuthorization")
-        self.assertIsNone(payload["deviceToken"])
+        self.assertNotIn("deviceToken", payload)
         self.assertEqual(api.access_token, "access")
         self.assertEqual(api.refresh_token, "refresh")
+
+    async def test_logout_uses_refresh_token_and_clears_session(self):
+        api = AospIntercomAPI(instance_id="0123456789abcdef")
+        api.set_tokens("access", "refresh", "2099-01-01T00:00:00Z")
+        calls = []
+
+        async def fake_post(path, payload=None, **kwargs):
+            calls.append((path, payload, kwargs))
+            return ""
+
+        api._post = fake_post
+        result = await api.logout()
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][0], "/sso-api/Authorization/Logout")
+        self.assertEqual(calls[0][1], {"refreshToken": "refresh"})
+        self.assertIsNone(api.access_token)
+        self.assertIsNone(api.refresh_token)
 
 
 if __name__ == "__main__":
