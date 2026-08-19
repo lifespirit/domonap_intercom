@@ -46,6 +46,8 @@ class IntercomNotifyConsumer:
         self._stop_event = asyncio.Event()
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._headers: dict[str, str] = {}
+        self._invocation_seq = 0
+        self._pending_invocations: dict[str, str] = {}
 
     async def start(self) -> None:
         """Keep one direct SignalR WebSocket alive until the integration stops.
@@ -156,6 +158,7 @@ class IntercomNotifyConsumer:
                     autoping=False,
                 ) as ws:
                     self._ws = ws
+                    self._pending_invocations.clear()
                     _LOGGER.info("SignalR WebSocket connected to %s", ws_url)
 
                     # Microsoft SignalR Java sends HubProtocol messages through a
@@ -166,6 +169,14 @@ class IntercomNotifyConsumer:
                     handshake_completed = True
                     self._connected = True
                     _LOGGER.info("SignalR handshake completed")
+
+                    # SignalRService in the tablet APK exposes an outbound
+                    # SetOnlineStatus(Boolean) hub invocation. A connected socket
+                    # alone may not make the backend consider this client eligible
+                    # for routed call notifications, so publish the same presence
+                    # state after every successful reconnect.
+                    await self._invoke(ws, "SetOnlineStatus", [True])
+
                     ping_task = asyncio.create_task(self._keepalive(ws))
                     try:
                         async for msg in ws:
@@ -197,6 +208,7 @@ class IntercomNotifyConsumer:
         finally:
             self._connected = False
             self._ws = None
+            self._pending_invocations.clear()
             if handshake_completed:
                 _LOGGER.info("SignalR WebSocket disconnected")
 
@@ -226,6 +238,31 @@ class IntercomNotifyConsumer:
 
             if await self._handle_text(payload, ws):
                 return
+
+    async def _invoke(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+        target: str,
+        arguments: list[Any],
+    ) -> str:
+        """Send a SignalR hub invocation and return its invocation id."""
+        self._invocation_seq += 1
+        invocation_id = str(self._invocation_seq)
+        message = {
+            "type": 1,
+            "invocationId": invocation_id,
+            "target": target,
+            "arguments": arguments,
+        }
+        payload = json.dumps(message, separators=(",", ":")) + WS_MESSAGE_END
+        self._pending_invocations[invocation_id] = target
+        await ws.send_bytes(payload.encode("utf-8"))
+        _LOGGER.info(
+            "SignalR invocation sent: target=%s invocationId=%s",
+            target,
+            invocation_id,
+        )
+        return invocation_id
 
     async def _handle_ws_message(
         self,
@@ -309,7 +346,24 @@ class IntercomNotifyConsumer:
         elif msg_type == 6:
             _LOGGER.debug("SignalR server ping")
         elif msg_type == 3:
-            _LOGGER.debug("SignalR completion frame: %s", data)
+            invocation_id = str(data.get("invocationId", ""))
+            target = self._pending_invocations.pop(invocation_id, None)
+            if target:
+                if data.get("error"):
+                    _LOGGER.warning(
+                        "SignalR invocation failed: target=%s invocationId=%s error=%s",
+                        target,
+                        invocation_id,
+                        data.get("error"),
+                    )
+                else:
+                    _LOGGER.info(
+                        "SignalR invocation completed: target=%s invocationId=%s",
+                        target,
+                        invocation_id,
+                    )
+            else:
+                _LOGGER.debug("SignalR completion frame: %s", data)
         elif msg_type == 7:
             _LOGGER.warning("SignalR close frame: %s", data.get("error") or data)
             await ws.close()
@@ -323,6 +377,7 @@ class IntercomNotifyConsumer:
         target = data.get("target")
         args: Iterable = data.get("arguments") or []
         args = list(args)
+        _LOGGER.debug("SignalR invocation received: target=%s args=%d", target, len(args))
 
         if target == "ReceivePush":
             title = args[0] if len(args) >= 1 else ""
