@@ -1,19 +1,26 @@
 author:
-  email: svmironov@users.noreply.github.com
-  homepage: https://github.com/svmironov/domonap_intercom
-  name: svmironov
-description: Domonap intercom component
+  homepage: https://github.com/lifespirit/domonap_intercom
+  name: lifespirit
+description: Domonap intercom component with AOSP panel SignalR support
 files:
   - custom_components/domonap/__init__.py
+  - custom_components/domonap/actions.py
+  - custom_components/domonap/aosp_api.py
   - custom_components/domonap/api.py
-  - custom_components/domonap/consts.py
-  - custom_components/domonap/config_flow.py
+  - custom_components/domonap/binary_sensor.py
   - custom_components/domonap/button.py
   - custom_components/domonap/camera.py
-  - custom_components/domonap/notify_consumer.py
-  - custom_components/domonap/binary_sensor.py
-  - custom_components/domonap/sensor.py
+  - custom_components/domonap/config_flow.py
+  - custom_components/domonap/const.py
   - custom_components/domonap/image.py
+  - custom_components/domonap/manifest.json
+  - custom_components/domonap/media_proxy.py
+  - custom_components/domonap/notify_consumer.py
+  - custom_components/domonap/sensor.py
+  - custom_components/domonap/services.yaml
+  - custom_components/domonap/translations
+  - custom_components/domonap/util.py
+  - custom_components/domonap/webrtc_proxy.py
 keywords:
   - domonap
   - intercom
