@@ -37,28 +37,30 @@ class AospApiContractTests(unittest.IsolatedAsyncioTestCase):
     def test_new_instance_id_matches_android_id_shape(self):
         api = AospIntercomAPI()
         self.assertRegex(api.instance_id, re.compile(r"^[0-9a-f]{16}$"))
-        self.assertEqual(api.headers["dom-app"], "panel;")
-        self.assertEqual(api.headers["dom-platform"], "panel;")
+        self.assertEqual(api.headers["dom-app"], "mobile;")
+        self.assertEqual(api.headers["dom-platform"], "Android;")
         self.assertIsNone(api.device_token)
 
     def test_existing_instance_id_is_reused(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
         self.assertEqual(api.instance_id, "0123456789abcdef")
 
-    def test_signalr_headers_do_not_include_rest_device_identity(self):
+    def test_signalr_headers_contain_only_signalr_user_agent(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
         headers = api.signalr_headers()
-        self.assertEqual(headers["dom-app"], "panel;")
-        self.assertEqual(headers["dom-platform"], "panel;")
+        self.assertIn("User-Agent", headers)
+        self.assertNotIn("dom-app", headers)
+        self.assertNotIn("dom-platform", headers)
         self.assertNotIn("instanceId", headers)
         self.assertNotIn("device-info", headers)
         self.assertNotIn("Authorization", headers)
 
     def test_device_info_uses_analyzed_aosp_release(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
-        self.assertIn('"InstanceId":"0123456789abcdef"', api.headers["device-info"])
+        self.assertIn('"instanceId":"0123456789abcdef"', api.headers["device-info"])
         self.assertIn('"versionCode":"9845"', api.headers["device-info"])
         self.assertIn('"versionName":"9845"', api.headers["device-info"])
+        self.assertIn('"osVersion":', api.headers["device-info"])
 
     async def test_sms_confirm_omits_push_device_token_and_stores_auth(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
