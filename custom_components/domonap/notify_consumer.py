@@ -124,7 +124,13 @@ class IntercomNotifyConsumer:
         return self._connected
 
     async def _connect_and_run(self) -> bool:
-        """Open WebSocket directly; prodAospRelease skips SignalR negotiate."""
+        """Open WebSocket directly; prodAospRelease skips SignalR negotiate.
+
+        Return True when this attempt reached the SignalR CONNECTED state, even
+        if it later died from server timeout or another transport error. The
+        reconnect controller uses that distinction to match the APK's immediate
+        first retry after an established connection is lost.
+        """
         self._headers = dict(self._api.signalr_headers())
         if self._api.access_token:
             self._headers["Authorization"] = f"Bearer {self._api.access_token}"
@@ -138,43 +144,63 @@ class IntercomNotifyConsumer:
                 base = "ws://" + base[len("http://") :]
             ws_url = base + "/notificationHub"
 
+        handshake_completed = False
         timeout = aiohttp.ClientTimeout(total=None)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.ws_connect(
-                ws_url,
-                headers=self._headers,
-                receive_timeout=WS_SERVER_TIMEOUT,
-                autoping=False,
-            ) as ws:
-                self._ws = ws
-                _LOGGER.info("SignalR WebSocket connected to %s", ws_url)
 
-                # Microsoft SignalR Java sends HubProtocol messages through a
-                # ByteBuffer, so OkHttp emits binary WebSocket frames.
-                await ws.send_bytes(WS_HANDSHAKE_MESSAGE.encode("utf-8"))
-                await self._wait_for_handshake(ws)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.ws_connect(
+                    ws_url,
+                    headers=self._headers,
+                    receive_timeout=WS_SERVER_TIMEOUT,
+                    autoping=False,
+                ) as ws:
+                    self._ws = ws
+                    _LOGGER.info("SignalR WebSocket connected to %s", ws_url)
 
-                self._connected = True
-                _LOGGER.info("SignalR handshake completed")
-                ping_task = asyncio.create_task(self._keepalive(ws))
-                try:
-                    async for msg in ws:
-                        if self._stop_event.is_set():
-                            break
-                        await self._handle_ws_message(msg, ws)
-                finally:
-                    ping_task.cancel()
+                    # Microsoft SignalR Java sends HubProtocol messages through a
+                    # ByteBuffer, so OkHttp emits binary WebSocket frames.
+                    await ws.send_bytes(WS_HANDSHAKE_MESSAGE.encode("utf-8"))
+                    await self._wait_for_handshake(ws)
+
+                    handshake_completed = True
+                    self._connected = True
+                    _LOGGER.info("SignalR handshake completed")
+                    ping_task = asyncio.create_task(self._keepalive(ws))
                     try:
-                        await ping_task
-                    except asyncio.CancelledError:
-                        pass
-                    self._connected = False
-                    self._ws = None
-                    _LOGGER.info("SignalR WebSocket disconnected")
+                        async for msg in ws:
+                            if self._stop_event.is_set():
+                                break
+                            await self._handle_ws_message(msg, ws)
+                    finally:
+                        ping_task.cancel()
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
+        except asyncio.CancelledError:
+            raise
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as err:
+            if not handshake_completed:
+                raise
+            _LOGGER.warning("SignalR server timeout after connect: %s", err)
+        except aiohttp.WSServerHandshakeError:
+            raise
+        except Exception as err:
+            if not handshake_completed:
+                raise
+            _LOGGER.warning(
+                "SignalR established connection ended with error: %s: %s",
+                type(err).__name__,
+                err,
+            )
+        finally:
+            self._connected = False
+            self._ws = None
+            if handshake_completed:
+                _LOGGER.info("SignalR WebSocket disconnected")
 
-        # Reaching here means the connection had completed the SignalR
-        # handshake, even if it subsequently closed with an error.
-        return True
+        return handshake_completed
 
     async def _wait_for_handshake(
         self, ws: aiohttp.ClientWebSocketResponse
@@ -276,6 +302,8 @@ class IntercomNotifyConsumer:
             return False
 
         msg_type = data.get("type")
+        if msg_type is None and data.get("error"):
+            raise RuntimeError(f"SignalR handshake failed: {data['error']}")
         if msg_type == 1:
             await self._handle_invocation(data, ws)
         elif msg_type == 6:
