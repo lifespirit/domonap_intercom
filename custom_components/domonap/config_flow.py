@@ -95,7 +95,12 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             ):
                 errors["base"] = "confirmation_failed"
             else:
+                # Copy all persistent state before closing the temporary HTTP
+                # client used only by the config flow. Runtime setup creates a
+                # fresh AospIntercomAPI with these stored tokens/instanceId.
                 data = self._entry_data()
+                await self._api.close()
+
                 if self._reauth_entry is not None:
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry,
@@ -107,6 +112,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         self._reauth_entry.entry_id
                     )
                     return self.async_abort(reason="reauth_successful")
+
                 return self.async_create_entry(
                     title="+" + self._country_code + " " + self._phone_number,
                     data=data,
