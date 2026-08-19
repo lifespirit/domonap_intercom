@@ -12,12 +12,26 @@ custom_components.__path__ = [str(ROOT / "custom_components")]
 domonap_pkg = sys.modules.setdefault("custom_components.domonap", types.ModuleType("custom_components.domonap"))
 domonap_pkg.__path__ = [str(PKG)]
 
-# Minimal Home Assistant stub needed only for importing notify_consumer.
+# Minimal Home Assistant stubs needed by const.py and notify_consumer.py.
 homeassistant = types.ModuleType("homeassistant")
 homeassistant_core = types.ModuleType("homeassistant.core")
 homeassistant_core.HomeAssistant = object
+
+homeassistant_const = types.ModuleType("homeassistant.const")
+
+
+class Platform:
+    BUTTON = "button"
+    CAMERA = "camera"
+    BINARY_SENSOR = "binary_sensor"
+    SENSOR = "sensor"
+    IMAGE = "image"
+
+
+homeassistant_const.Platform = Platform
 sys.modules.setdefault("homeassistant", homeassistant)
 sys.modules.setdefault("homeassistant.core", homeassistant_core)
+sys.modules.setdefault("homeassistant.const", homeassistant_const)
 
 
 def load_module(name: str, filename: str):
@@ -31,7 +45,7 @@ def load_module(name: str, filename: str):
     return module
 
 
-api_mod = load_module("custom_components.domonap.api", "api.py")
+load_module("custom_components.domonap.api", "api.py")
 const = load_module("custom_components.domonap.const", "const.py")
 aosp_mod = load_module("custom_components.domonap.aosp_api", "aosp_api.py")
 notify_mod = load_module("custom_components.domonap.notify_consumer", "notify_consumer.py")
