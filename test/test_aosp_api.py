@@ -1,7 +1,36 @@
+import importlib.util
 import re
+import sys
+import types
 import unittest
+from pathlib import Path
 
-from custom_components.domonap.aosp_api import AospIntercomAPI
+ROOT = Path(__file__).resolve().parents[1]
+PKG = ROOT / "custom_components" / "domonap"
+
+# Load protocol modules without importing custom_components.domonap.__init__,
+# so these contract tests don't require a full Home Assistant installation.
+custom_components = types.ModuleType("custom_components")
+custom_components.__path__ = [str(ROOT / "custom_components")]
+sys.modules.setdefault("custom_components", custom_components)
+
+domonap_pkg = types.ModuleType("custom_components.domonap")
+domonap_pkg.__path__ = [str(PKG)]
+sys.modules.setdefault("custom_components.domonap", domonap_pkg)
+
+
+def load_module(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, PKG / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+load_module("custom_components.domonap.api", "api.py")
+aosp_api = load_module("custom_components.domonap.aosp_api", "aosp_api.py")
+AospIntercomAPI = aosp_api.AospIntercomAPI
 
 
 class AospApiContractTests(unittest.IsolatedAsyncioTestCase):
@@ -15,6 +44,15 @@ class AospApiContractTests(unittest.IsolatedAsyncioTestCase):
     def test_existing_instance_id_is_reused(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
         self.assertEqual(api.instance_id, "0123456789abcdef")
+
+    def test_signalr_headers_do_not_include_rest_device_identity(self):
+        api = AospIntercomAPI(instance_id="0123456789abcdef")
+        headers = api.signalr_headers()
+        self.assertEqual(headers["dom-app"], "panel;")
+        self.assertEqual(headers["dom-platform"], "panel;")
+        self.assertNotIn("instanceId", headers)
+        self.assertNotIn("device-info", headers)
+        self.assertNotIn("Authorization", headers)
 
     async def test_sms_confirm_sends_null_device_token_and_stores_auth(self):
         api = AospIntercomAPI(instance_id="0123456789abcdef")
