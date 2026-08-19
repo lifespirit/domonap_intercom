@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from secrets import token_hex
 from typing import Any, Dict, Optional
 
 from .api import IntercomAPI
@@ -22,10 +23,14 @@ class AospIntercomAPI(IntercomAPI):
         base_url: str = "https://api.domonap.ru",
         instance_id: Optional[str] = None,
     ) -> None:
-        # IntercomAPI currently owns the common REST/session implementation. It
-        # creates an internal legacy device_token, but AOSP mode never exposes,
-        # persists or sends it. Keeping this detail contained here lets the rest
-        # of the integration migrate without disturbing the common REST methods.
+        # Android's Settings.Secure.ANDROID_ID is represented as a stable 64-bit
+        # hexadecimal string. Home Assistant has no Android ID, so create the
+        # closest synthetic equivalent once and persist it in ConfigEntry.
+        instance_id = instance_id or token_hex(8)
+
+        # IntercomAPI owns the common REST/session implementation. It still
+        # creates a legacy internal device_token during construction, but AOSP
+        # mode immediately discards it and never persists or sends it.
         super().__init__(
             base_url=base_url,
             instance_id=instance_id,
