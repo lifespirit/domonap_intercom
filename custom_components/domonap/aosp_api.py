@@ -7,7 +7,11 @@ from typing import Any, Dict, Optional, Union
 
 import aiohttp
 
-from .api import DEFAULT_JSON_CONTENT_TYPE, IntercomAPI
+from .api import (
+    DEFAULT_JSON_CONTENT_TYPE,
+    SIGNALR_USER_AGENT,
+    IntercomAPI,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,23 +20,22 @@ AOSP_APP_VERSION_NAME = "9845"
 
 
 def _build_aosp_device_info(instance_id: str) -> str:
-    """Build a stable synthetic tablet DeviceInfoModel.
+    """Build a stable synthetic DeviceInfoModel for the analyzed AOSP client.
 
-    The APK reads these fields from Android Build.* at runtime, so the APK does
-    not contain one universally correct hardware model. The values below model
-    a generic AOSP tablet while preserving the exact field layout and the
-    analyzed prodAospRelease application version.
+    The APK reads the hardware values from Android Build.* at runtime, so there
+    is no single hardware model embedded in the APK. The JSON property names,
+    however, are confirmed by the DeviceInfoModel fields and Gson serialization.
     """
     info = {
-        "OsVersion": "5.10.0-android12",
-        "Release": "12",
-        "Device": "aosp_tablet",
-        "Model": "AOSP Tablet",
-        "Product": "aosp_tablet",
-        "Brand": "AOSP",
-        "ID": "SP1A.210812.016",
-        "Manufacturer": "AOSP",
-        "InstanceId": instance_id,
+        "osVersion": "5.10.0-android12",
+        "release": "12",
+        "device": "aosp_tablet",
+        "model": "AOSP Tablet",
+        "product": "aosp_tablet",
+        "brand": "AOSP",
+        "id": "SP1A.210812.016",
+        "manufacturer": "AOSP",
+        "instanceId": instance_id,
         "versionCode": AOSP_APP_VERSION_CODE,
         "versionName": AOSP_APP_VERSION_NAME,
     }
@@ -40,12 +43,18 @@ def _build_aosp_device_info(instance_id: str) -> str:
 
 
 class AospIntercomAPI(IntercomAPI):
-    """Domonap API profile matching the prodAospRelease tablet application.
+    """Regular phone-auth profile of the prodAospRelease tablet application.
 
-    The AOSP tablet flavor has no GMS/HMS push core. Its persistent identity is
-    instanceId, while incoming events are delivered over a long-lived SignalR
-    WebSocket. A push-provider deviceToken is therefore neither generated for
-    authentication nor registered with UpdateDeviceToken.
+    The APK has two distinct authorization routes:
+
+    * regular LoginScreen (phone/SMS) explicitly sets DomHeadersType.Regular;
+      REST then uses ``dom-app: mobile;`` and ``dom-platform: Android;``;
+    * RubetekLoginScreen explicitly sets DomHeadersType.Rubetek and uses the
+      separate ConfirmAuthorizationCode panel flow.
+
+    Home Assistant uses the regular phone/SMS route. The AOSP flavor still has
+    no GMS/HMS push core, so no push deviceToken is generated or registered.
+    Incoming events are delivered by the persistent SignalR WebSocket.
     """
 
     def __init__(
@@ -53,14 +62,19 @@ class AospIntercomAPI(IntercomAPI):
         base_url: str = "https://api.domonap.ru",
         instance_id: Optional[str] = None,
     ) -> None:
-        # Settings.Secure.ANDROID_ID is normally a stable 64-bit hex value.
+        # Settings.Secure.ANDROID_ID is normally a stable 64-bit hexadecimal
+        # string. HA has no Android ID, so generate one once and persist it.
         instance_id = instance_id or token_hex(8)
 
+        # The APK's regular LoginScreen explicitly switches DomHeadersType to
+        # Regular before calling Authorize. In the AOSP flavor lastPushService
+        # is initialized to Android even though the available push-core list is
+        # empty, therefore the wire headers are mobile/Android.
         super().__init__(
             base_url=base_url,
             instance_id=instance_id,
-            device_platform="panel",
-            dom_app="panel",
+            device_platform="Android",
+            dom_app="mobile",
         )
         self.device_token = None
         self.headers["device-info"] = _build_aosp_device_info(self.instance_id)
@@ -68,6 +82,16 @@ class AospIntercomAPI(IntercomAPI):
         if self._session and not self._session.closed:
             self._session._default_headers.clear()
             self._session._default_headers.update(self.headers)
+
+    def signalr_headers(self) -> Dict[str, str]:
+        """Return the headers actually supplied by Microsoft SignalR Java.
+
+        The APK's provideSignalR() does not call HttpHubConnectionBuilder.withHeader.
+        HubConnection itself adds its SignalR User-Agent and the access-token
+        provider adds Authorization. REST-only dom-app/dom-platform, instanceId
+        and device-info are not sent on the WebSocket upgrade.
+        """
+        return {"User-Agent": SIGNALR_USER_AGENT}
 
     async def _post(
         self,
@@ -136,10 +160,10 @@ class AospIntercomAPI(IntercomAPI):
     async def authorize(
         self, country_code: str, phone_number: str
     ) -> Union[bool, Dict[str, Any]]:
-        _LOGGER.info("AOSP authorization: requesting SMS code")
+        _LOGGER.info("AOSP regular authorization: requesting SMS code")
         result = await super().authorize(country_code, phone_number)
         if result is True:
-            _LOGGER.info("AOSP authorization: SMS code requested")
+            _LOGGER.info("AOSP regular authorization: SMS code requested")
         return result
 
     async def confirm_authorization(
@@ -149,12 +173,15 @@ class AospIntercomAPI(IntercomAPI):
         confirm_code: str,
         device_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Confirm SMS authorization exactly as the no-push AOSP flavor does.
+        """Confirm phone authorization without a push-provider device token.
 
-        The Kotlin model carries deviceToken=null. The APK's Gson configuration
-        has serializeNulls=false, so that null property is omitted from JSON.
+        AuthorizationViewModel obtains a null device token in prodAospRelease.
+        The APK's Gson has serializeNulls=false, so ``deviceToken`` is omitted
+        from the JSON body rather than serialized as JSON null.
         """
-        _LOGGER.info("AOSP authorization: confirming SMS code without push token")
+        _LOGGER.info(
+            "AOSP regular authorization: confirming SMS code without push token"
+        )
         payload = {
             "phoneNumber": self._phone_number(country_code, phone_number),
             "confirmCode": confirm_code,
@@ -181,7 +208,7 @@ class AospIntercomAPI(IntercomAPI):
                     complete_token["refreshToken"],
                     complete_token["refreshExpirationDate"],
                 )
-            _LOGGER.info("AOSP authorization: session established")
+            _LOGGER.info("AOSP regular authorization: session established")
         except Exception as err:
             _LOGGER.exception("Unexpected AOSP confirm_authorization response: %s", err)
         return res
@@ -190,7 +217,7 @@ class AospIntercomAPI(IntercomAPI):
         """Invalidate the current server session using the refresh token.
 
         This is intentionally not called from Home Assistant unload/restart.
-        It is for an explicit future "sign out/remove account" operation.
+        It is for an explicit future sign-out/remove-account operation.
         """
         if not self.refresh_token:
             return {"ok": True, "skipped": True, "reason": "no_refresh_token"}
