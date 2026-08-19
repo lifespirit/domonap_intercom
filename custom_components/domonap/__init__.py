@@ -165,10 +165,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     setup_complete = True
 
-    # Build REST-backed entities first. This also exercises the authenticated
-    # REST session (and its 401 -> refresh path) before persistent SignalR starts.
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # SignalR is an independent persistent transport in prodAospRelease. Start
+    # it before REST-backed platform setup so a temporary keys/camera API error
+    # cannot suppress incoming call delivery.
     entry.async_create_background_task(hass, consumer.start(), "domonap_notify")
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
@@ -194,7 +195,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
 
     remaining_entries = [
-        key for key in hass.data.get(DOMAIN, {}) if key != WEBRTC_PROXY
+        key
+        for key in hass.data.get(DOMAIN, {})
+        if key not in (WEBRTC_PROXY, MEDIA_PROXY)
     ]
     if not remaining_entries:
         from .actions import async_unload_actions
