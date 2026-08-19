@@ -65,8 +65,6 @@ class AospIntercomAPI(IntercomAPI):
         self.device_token = None
         self.headers["device-info"] = _build_aosp_device_info(self.instance_id)
 
-        # The parent may already have created a session only in unusual custom
-        # construction flows. Recreate it later with the AOSP headers if so.
         if self._session and not self._session.closed:
             self._session._default_headers.clear()
             self._session._default_headers.update(self.headers)
@@ -141,11 +139,14 @@ class AospIntercomAPI(IntercomAPI):
         confirm_code: str,
         device_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Confirm SMS authorization exactly as the no-push AOSP flavor does."""
+        """Confirm SMS authorization exactly as the no-push AOSP flavor does.
+
+        The Kotlin model carries deviceToken=null. The APK's Gson configuration
+        has serializeNulls=false, so that null property is omitted from JSON.
+        """
         payload = {
             "phoneNumber": self._phone_number(country_code, phone_number),
             "confirmCode": confirm_code,
-            "deviceToken": None,
         }
         res = await self._post(
             "/sso-api/Authorization/ConfirmAuthorization",
