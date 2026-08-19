@@ -4,19 +4,28 @@ import re
 from secrets import token_urlsafe
 from typing import Any, Optional
 
-from .const import DOMAIN, CONF_COUNTRY_CODE, CONF_PHONE_NUMBER, CONF_CONFIRM_CODE, PARAM_REFRESH_EXPIRATION, \
-    PARAM_REFRESH_TOKEN, PARAM_ACCESS_TOKEN, PARAM_WEBRTC_PROXY_SECRET, PARAM_DEVICE_TOKEN, PARAM_INSTANCE_ID
-from .api import IntercomAPI, is_android_guid
+from .const import (
+    DOMAIN,
+    CONF_COUNTRY_CODE,
+    CONF_PHONE_NUMBER,
+    CONF_CONFIRM_CODE,
+    PARAM_REFRESH_EXPIRATION,
+    PARAM_REFRESH_TOKEN,
+    PARAM_ACCESS_TOKEN,
+    PARAM_WEBRTC_PROXY_SECRET,
+    PARAM_INSTANCE_ID,
+)
+from .aosp_api import AospIntercomAPI
 
 
 class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self):
         self._country_code = None
         self._phone_number = None
         self._confirm_code = None
-        self._api = IntercomAPI()
+        self._api = AospIntercomAPI()
         self._reauth_entry = None
 
     async def async_step_reauth(self, entry_data: dict[str, Any]):
@@ -25,11 +34,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
         self._country_code = entry_data.get(CONF_COUNTRY_CODE)
         self._phone_number = entry_data.get(CONF_PHONE_NUMBER)
-        stored_device_token = entry_data.get(PARAM_DEVICE_TOKEN)
-        self._api = IntercomAPI(
-            device_token=(
-                stored_device_token if is_android_guid(stored_device_token) else None
-            ),
+        self._api = AospIntercomAPI(
             instance_id=entry_data.get(PARAM_INSTANCE_ID),
         )
         return await self.async_step_reauth_confirm()
@@ -96,13 +101,14 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         self._reauth_entry,
                         title="+" + self._country_code + " " + self._phone_number,
                         data=data,
+                        version=self.VERSION,
                     )
                     await self.hass.config_entries.async_reload(
                         self._reauth_entry.entry_id
                     )
                     return self.async_abort(reason="reauth_successful")
                 return self.async_create_entry(
-                    title= "+" + self._country_code + " " + self._phone_number,
+                    title="+" + self._country_code + " " + self._phone_number,
                     data=data,
                 )
 
@@ -115,8 +121,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     def _sanitize_number(self, input_string):
-        sanitized = re.sub(r'\D', '', input_string)
-        return sanitized
+        return re.sub(r"\D", "", input_string)
 
     async def _send_authorization_code(self):
         return await self._api.authorize(self._country_code, self._phone_number)
@@ -124,12 +129,14 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     def _entry_data(self) -> dict[str, Optional[str]]:
         data = dict(self._reauth_entry.data) if self._reauth_entry is not None else {}
         data.setdefault(PARAM_WEBRTC_PROXY_SECRET, token_urlsafe(24))
+        # device_token belonged to the mobile FCM/HMS flow. The AOSP tablet
+        # flavor has no push core, so remove legacy values during reauth.
+        data.pop("device_token", None)
         data.update(
             {
                 PARAM_ACCESS_TOKEN: self._api.access_token,
                 PARAM_REFRESH_TOKEN: self._api.refresh_token,
                 PARAM_REFRESH_EXPIRATION: self._api.refresh_expiration_date,
-                PARAM_DEVICE_TOKEN: self._api.device_token,
                 PARAM_INSTANCE_ID: self._api.instance_id,
                 CONF_COUNTRY_CODE: self._country_code,
                 CONF_PHONE_NUMBER: self._phone_number,
