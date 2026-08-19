@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -43,9 +45,6 @@ class IntercomNotifyConsumer:
         self._connected = False
         self._stop_event = asyncio.Event()
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
-
-        # Rebuilt before every connection so a refreshed access token is always
-        # used by the next HubConnection.start(), like withAccessTokenProvider().
         self._headers: dict[str, str] = {}
 
     async def start(self) -> None:
@@ -85,20 +84,19 @@ class IntercomNotifyConsumer:
                     )
             except Exception as err:
                 _LOGGER.warning(
-                    "SignalR loop error: %s: %s", type(err).__name__, err
+                    "SignalR start error: %s: %s", type(err).__name__, err
                 )
 
             if self._stop_event.is_set():
                 break
 
             if connected:
-                # A successfully established connection closed unexpectedly:
-                # the tablet immediately tries once more.
+                # The connection reached SignalR CONNECTED and then closed.
+                # SignalRConnectionManager schedules one immediate retry.
                 delay = 0
             else:
-                # Failed start/reconnect: exponential backoff as in the APK.
                 if first_start:
-                    # The initial 2 s delay was already consumed.
+                    # Initial 2 s startup delay was already consumed.
                     delay = min(WS_RECONNECT_INITIAL * 2, WS_RECONNECT_MAX)
                 elif delay <= 0:
                     delay = WS_RECONNECT_INITIAL
@@ -131,8 +129,6 @@ class IntercomNotifyConsumer:
         if self._api.access_token:
             self._headers["Authorization"] = f"Bearer {self._api.access_token}"
 
-        # Microsoft SignalR Java with shouldSkipNegotiate(true) converts the
-        # https hub URL directly to wss and does not append ?id=...
         ws_url = WS_URL
         if self._api.base_url != "https://api.domonap.ru":
             base = self._api.base_url.rstrip("/")
@@ -153,14 +149,13 @@ class IntercomNotifyConsumer:
                 self._ws = ws
                 _LOGGER.info("SignalR WebSocket connected to %s", ws_url)
 
-                # SignalR Java sends HubProtocol messages through ByteBuffer,
-                # therefore OkHttp emits binary WebSocket frames.
+                # Microsoft SignalR Java sends HubProtocol messages through a
+                # ByteBuffer, so OkHttp emits binary WebSocket frames.
                 await ws.send_bytes(WS_HANDSHAKE_MESSAGE.encode("utf-8"))
-
                 await self._wait_for_handshake(ws)
+
                 self._connected = True
                 _LOGGER.info("SignalR handshake completed")
-
                 ping_task = asyncio.create_task(self._keepalive(ws))
                 try:
                     async for msg in ws:
@@ -177,6 +172,8 @@ class IntercomNotifyConsumer:
                     self._ws = None
                     _LOGGER.info("SignalR WebSocket disconnected")
 
+        # Reaching here means the connection had completed the SignalR
+        # handshake, even if it subsequently closed with an error.
         return True
 
     async def _wait_for_handshake(
@@ -217,7 +214,9 @@ class IntercomNotifyConsumer:
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
             return
         if msg.type == aiohttp.WSMsgType.ERROR:
-            raise RuntimeError(f"WebSocket error: {ws.exception()}")
+            _LOGGER.warning("SignalR WebSocket error: %s", ws.exception())
+            await ws.close()
+            return
 
         payload = self._payload_from_message(msg)
         if payload is None:
@@ -284,7 +283,8 @@ class IntercomNotifyConsumer:
         elif msg_type == 3:
             _LOGGER.debug("SignalR completion frame: %s", data)
         elif msg_type == 7:
-            raise RuntimeError(f"SignalR close frame: {data.get('error') or data}")
+            _LOGGER.warning("SignalR close frame: %s", data.get("error") or data)
+            await ws.close()
         else:
             _LOGGER.debug("Unknown SignalR frame type=%s data=%s", msg_type, payload[:300])
         return False
@@ -304,8 +304,6 @@ class IntercomNotifyConsumer:
                 _LOGGER.debug("ReceivePush without map payload: %s", args)
                 return
 
-            # NotificationHub in the tablet app merges title/body into the map
-            # before domain-specific processing.
             push_data = dict(push_data)
             push_data.setdefault("Title", title or "")
             push_data.setdefault("Body", body or "")
@@ -352,18 +350,12 @@ class IntercomNotifyConsumer:
             return
 
         if target == "ReceiveRead":
-            self._hass.bus.fire(
-                "domonap_receive_read",
-                {"arguments": args},
-            )
+            self._hass.bus.fire("domonap_receive_read", {"arguments": args})
             _LOGGER.debug("Domonap ReceiveRead: %s", args)
             return
 
         if target == "ReceiveTyping":
-            self._hass.bus.fire(
-                "domonap_receive_typing",
-                {"arguments": args},
-            )
+            self._hass.bus.fire("domonap_receive_typing", {"arguments": args})
             _LOGGER.debug("Domonap ReceiveTyping: %s", args)
             return
 
@@ -377,9 +369,6 @@ class IntercomNotifyConsumer:
             push_data.setdefault("OriginalVideoPreview", video_preview)
             push_data["VideoPreview"] = proxied_preview or video_preview
             push_data["videoPreview"] = proxied_preview or video_preview
-            # Existing automations use PhotoUrl first. The APK push already has
-            # VideoPreview, so use it immediately instead of delaying the event
-            # while polling CallLog.
             push_data.setdefault("PhotoUrl", proxied_preview or video_preview)
             push_data.setdefault("photoUrl", proxied_preview or video_preview)
 
