@@ -129,8 +129,18 @@ class AospIntercomAPI(IntercomAPI):
             "status": resp.status,
             "body": body_text[:2000],
         }
-        _LOGGER.error("Request failed: POST %s payload=%s -> %s", path, payload, err)
+        # Never log payload here: auth payloads may contain SMS codes or refresh tokens.
+        _LOGGER.error("AOSP REST failed: POST %s -> %s", path, err)
         return err
+
+    async def authorize(
+        self, country_code: str, phone_number: str
+    ) -> Union[bool, Dict[str, Any]]:
+        _LOGGER.info("AOSP authorization: requesting SMS code")
+        result = await super().authorize(country_code, phone_number)
+        if result is True:
+            _LOGGER.info("AOSP authorization: SMS code requested")
+        return result
 
     async def confirm_authorization(
         self,
@@ -144,6 +154,7 @@ class AospIntercomAPI(IntercomAPI):
         The Kotlin model carries deviceToken=null. The APK's Gson configuration
         has serializeNulls=false, so that null property is omitted from JSON.
         """
+        _LOGGER.info("AOSP authorization: confirming SMS code without push token")
         payload = {
             "phoneNumber": self._phone_number(country_code, phone_number),
             "confirmCode": confirm_code,
@@ -170,6 +181,7 @@ class AospIntercomAPI(IntercomAPI):
                     complete_token["refreshToken"],
                     complete_token["refreshExpirationDate"],
                 )
+            _LOGGER.info("AOSP authorization: session established")
         except Exception as err:
             _LOGGER.exception("Unexpected AOSP confirm_authorization response: %s", err)
         return res
