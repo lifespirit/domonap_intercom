@@ -55,10 +55,13 @@ def _dismiss_reauth_notification(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
-    # Register global actions (services).
     from .actions import async_setup_actions
     from .media_proxy import DomonapMediaProxy, DomonapMediaProxyView
-    from .webrtc_proxy import DomonapWebRTCProxy, DomonapWebRTCProxySessionView, DomonapWebRTCProxyView
+    from .webrtc_proxy import (
+        DomonapWebRTCProxy,
+        DomonapWebRTCProxySessionView,
+        DomonapWebRTCProxyView,
+    )
 
     await async_setup_actions(hass)
     proxy = DomonapWebRTCProxy(hass)
@@ -71,27 +74,40 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate mobile/push identity data to the AOSP tablet profile."""
+    if entry.version >= 2:
+        return True
+
+    from .aosp_api import AospIntercomAPI
+
+    new_data = dict(entry.data)
+    legacy_device_token = new_data.pop(PARAM_DEVICE_TOKEN, None)
+    if legacy_device_token:
+        _LOGGER.info("Removing legacy Domonap push device_token for AOSP mode")
+
+    if not new_data.get(PARAM_INSTANCE_ID):
+        new_data[PARAM_INSTANCE_ID] = AospIntercomAPI().instance_id
+
+    hass.config_entries.async_update_entry(entry, data=new_data, version=2)
+    _LOGGER.info("Migrated Domonap config entry %s to AOSP schema v2", entry.entry_id)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    from .api import IntercomAPI, is_android_guid
+    from .aosp_api import AospIntercomAPI
     from .notify_consumer import IntercomNotifyConsumer
 
     hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
-    stored_device_token = entry.data.get(PARAM_DEVICE_TOKEN)
-    api = IntercomAPI(
-        device_token=(
-            stored_device_token if is_android_guid(stored_device_token) else None
-        ),
-        instance_id=entry.data.get(PARAM_INSTANCE_ID),
-    )
+    api = AospIntercomAPI(instance_id=entry.data.get(PARAM_INSTANCE_ID))
 
     new_data = dict(entry.data)
+    # AOSP/panel mode has no FCM/HMS push provider. Keep one persistent
+    # synthetic instanceId, but discard legacy mobile deviceToken values.
+    new_data.pop(PARAM_DEVICE_TOKEN, None)
     if not new_data.get(PARAM_WEBRTC_PROXY_SECRET):
         new_data[PARAM_WEBRTC_PROXY_SECRET] = token_urlsafe(24)
-    if not is_android_guid(new_data.get(PARAM_DEVICE_TOKEN)):
-        if new_data.get(PARAM_DEVICE_TOKEN):
-            _LOGGER.info("Replacing legacy Domonap DeviceToken with Android GUID")
-        new_data[PARAM_DEVICE_TOKEN] = api.device_token
     if not new_data.get(PARAM_INSTANCE_ID):
         new_data[PARAM_INSTANCE_ID] = api.instance_id
     if new_data != entry.data:
@@ -110,12 +126,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         refresh_expiration_date: Optional[str],
     ) -> None:
         nonlocal setup_complete
-        _LOGGER.debug("Updating entry tokens in config_entry data")
-        new_data = dict(entry.data)
-        new_data.setdefault(PARAM_DEVICE_TOKEN, api.device_token)
-        new_data.setdefault(PARAM_INSTANCE_ID, api.instance_id)
+        _LOGGER.debug("Updating entry auth tokens in config_entry data")
+        updated = dict(entry.data)
+        updated.pop(PARAM_DEVICE_TOKEN, None)
+        updated.setdefault(PARAM_INSTANCE_ID, api.instance_id)
         if access_token and refresh_token and refresh_expiration_date:
-            new_data.update(
+            updated.update(
                 {
                     PARAM_ACCESS_TOKEN: access_token,
                     PARAM_REFRESH_TOKEN: refresh_token,
@@ -124,13 +140,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             _dismiss_reauth_notification(hass, entry)
         else:
-            new_data.pop(PARAM_ACCESS_TOKEN, None)
-            new_data.pop(PARAM_REFRESH_TOKEN, None)
-            new_data.pop(PARAM_REFRESH_EXPIRATION, None)
+            updated.pop(PARAM_ACCESS_TOKEN, None)
+            updated.pop(PARAM_REFRESH_TOKEN, None)
+            updated.pop(PARAM_REFRESH_EXPIRATION, None)
             _create_reauth_notification(hass, entry)
             if setup_complete and hasattr(entry, "async_start_reauth"):
                 entry.async_start_reauth(hass)
-        hass.config_entries.async_update_entry(entry, data=new_data)
+        hass.config_entries.async_update_entry(entry, data=updated)
 
     api.token_update_callback = update_entry
     if not api.has_valid_refresh_token():
@@ -148,9 +164,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["notify_consumer"] = consumer
 
     setup_complete = True
-    entry.async_create_background_task(hass, consumer.start(), "domonap_notify")
 
+    # Build REST-backed entities first. This also exercises the authenticated
+    # REST session (and its 401 -> refresh path) before persistent SignalR starts.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_create_background_task(hass, consumer.start(), "domonap_notify")
     return True
 
 
@@ -175,7 +193,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
 
-    # If this was the last entry, remove services.
     remaining_entries = [
         key for key in hass.data.get(DOMAIN, {}) if key != WEBRTC_PROXY
     ]
