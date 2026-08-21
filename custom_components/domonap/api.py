@@ -8,6 +8,8 @@ from secrets import token_bytes
 from typing import Any, Callable, Dict, Optional, Union
 from uuid import UUID
 
+from .sip import DomonapSipCall
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -129,6 +131,8 @@ class IntercomAPI:
         self._refresh_lock = asyncio.Lock()
         self._active_call_id: Optional[str] = None
         self._active_call_lock = asyncio.Lock()
+        self._active_sip_call: Optional[DomonapSipCall] = None
+        self._active_sip_call_id: Optional[str] = None
         # Порядок и формат заголовков как у DeviceIdInterceptor приложения:
         # dom-app/dom-platform с суффиксом ";", instanceId — БЕЗ ";", плюс
         # device-info с JSON профиля устройства.
@@ -164,6 +168,10 @@ class IntercomAPI:
 
     async def close(self):
         self._closed = True
+        if self._active_sip_call is not None:
+            await self._active_sip_call.stop()
+            self._active_sip_call = None
+            self._active_sip_call_id = None
         if self._session and not self._session.closed:
             await self._session.close()
         if self._external_session and not self._external_session.closed:
@@ -518,11 +526,67 @@ class IntercomAPI:
         normalized_call_id = str(call_id).strip() if call_id is not None else ""
         self._active_call_id = normalized_call_id or None
 
+    def start_active_sip_call(self, push_data: dict[str, Any]) -> None:
+        """Start the SIP registration used by the APK for an incoming call."""
+        raw_call_id = push_data.get("CallId") or push_data.get("callId")
+        call_id = str(raw_call_id).strip() if raw_call_id is not None else ""
+        if (
+            call_id
+            and call_id == self._active_sip_call_id
+            and self._active_sip_call is not None
+        ):
+            return
+        sip_data = push_data.get("SipData") or push_data.get("sipData") or push_data
+        if not isinstance(sip_data, dict):
+            return
+        account = (
+            sip_data.get("SipAccount")
+            or sip_data.get("sipAccount")
+            or sip_data.get("account")
+        )
+        password = (
+            sip_data.get("SipPassword")
+            or sip_data.get("sipPassword")
+            or sip_data.get("password")
+        )
+        domain = (
+            sip_data.get("SipDomain")
+            or sip_data.get("sipDomain")
+            or sip_data.get("domain")
+        )
+        raw_port = (
+            sip_data.get("SipPort")
+            or sip_data.get("sipPort")
+            or sip_data.get("port")
+        )
+        if not all((account, password, domain, raw_port)):
+            _LOGGER.debug("Incoming call does not contain complete SIP credentials")
+            return
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            _LOGGER.warning("Invalid Domonap SIP port: %s", raw_port)
+            return
+
+        previous = self._active_sip_call
+        if previous is not None:
+            asyncio.create_task(previous.stop())
+        self._active_sip_call = DomonapSipCall(
+            str(account), str(password), str(domain), port
+        )
+        self._active_sip_call_id = call_id or self._active_call_id
+        self._active_sip_call.start()
+
     def clear_active_call(self, call_id: Optional[str] = None) -> None:
         """Clear the active call, optionally only when its id still matches."""
         normalized_call_id = str(call_id).strip() if call_id is not None else ""
         if not normalized_call_id or self._active_call_id == normalized_call_id:
             self._active_call_id = None
+            sip_call = self._active_sip_call
+            self._active_sip_call = None
+            self._active_sip_call_id = None
+            if sip_call is not None:
+                asyncio.create_task(sip_call.stop())
 
     async def end_active_call(self):
         """End the current call once and return the API response, if any."""
@@ -531,8 +595,35 @@ class IntercomAPI:
             if not call_id:
                 return None
 
-            result = await self.end_call_notify(call_id)
-            if isinstance(result, dict) and result.get("ok") is True:
+            sip_call = self._active_sip_call
+            if sip_call is None:
+                sip_result = None
+                notify_result = await self.end_call_notify(call_id)
+            else:
+                try:
+                    sip_result = await sip_call.end()
+                except Exception as err:
+                    sip_result = {"ok": False, "error": str(err)}
+                if isinstance(sip_result, dict) and sip_result.get("ok") is True:
+                    notify_result = None
+                else:
+                    _LOGGER.warning(
+                        "SIP call termination unavailable for %s (%s); using REST fallback",
+                        call_id,
+                        sip_result,
+                    )
+                    notify_result = await self.end_call_notify(call_id)
+            sip_ok = isinstance(sip_result, dict) and sip_result.get("ok") is True
+            notify_ok = (
+                isinstance(notify_result, dict)
+                and notify_result.get("ok") is True
+            )
+            result = {
+                "ok": sip_ok or notify_ok,
+                "sip": sip_result,
+                "notify": notify_result,
+            }
+            if result["ok"]:
                 self.clear_active_call(call_id)
             return result
 

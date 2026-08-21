@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api import IntercomAPI, _generate_device_token
 from .const import (
+    EVENT_CALL_ENDED,
     EVENT_INCOMING_CALL,
     WS_MESSAGE_END,
     WS_HANDSHAKE_MESSAGE,
@@ -231,13 +232,16 @@ class IntercomNotifyConsumer:
                     self._api.set_active_call(
                         push_data.get("CallId") or push_data.get("callId")
                     )
+                    self._api.start_active_sip_call(push_data)
                     await self._prepare_incoming_call_event(push_data)
                     self._hass.bus.fire(EVENT_INCOMING_CALL, push_data)
                     _LOGGER.info("Incoming call fired: DoorId=%s CallId=%s", push_data.get("DoorId"), push_data.get("CallId"))
                 elif evt == "DomofonCallEnded":
+                    call_id = push_data.get("CallId") or push_data.get("callId")
                     self._api.clear_active_call(
-                        push_data.get("CallId") or push_data.get("callId")
+                        call_id
                     )
+                    self._hass.bus.fire(EVENT_CALL_ENDED, push_data)
                     # После завершения звонка сервер перестаёт слать пуши в это
                     # соединение — переподключаемся, чтобы поймать следующий звонок.
                     _LOGGER.info("Call ended, forcing WS reconnect for next call")

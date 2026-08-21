@@ -3,7 +3,7 @@ from typing import Optional, Callable
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
-from .const import DOMAIN, API, EVENT_INCOMING_CALL, RESET_DELAY
+from .const import DOMAIN, API, EVENT_CALL_ENDED, EVENT_INCOMING_CALL, RESET_DELAY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,8 +66,9 @@ class IntercomCallBinarySensor(BinarySensorEntity):
         self._name = name
         self._key_data = key_data
         self._state = False
+        self._active_call_id: str | None = None
         self._reset_timer: Optional[Callable[[], None]] = None
-        self._listener = None
+        self._listeners: list[Callable[[], None]] = []
 
     @property
     def unique_id(self):
@@ -91,13 +92,17 @@ class IntercomCallBinarySensor(BinarySensorEntity):
         }
 
     async def async_added_to_hass(self):
-        self._listener = self._hass.bus.async_listen(
-            EVENT_INCOMING_CALL, self._handle_incoming_call
-        )
+        self._listeners = [
+            self._hass.bus.async_listen(
+                EVENT_INCOMING_CALL, self._handle_incoming_call
+            ),
+            self._hass.bus.async_listen(EVENT_CALL_ENDED, self._handle_call_ended),
+        ]
 
     async def async_will_remove_from_hass(self):
-        if self._listener:
-            self._listener()
+        for listener in self._listeners:
+            listener()
+        self._listeners.clear()
         if self._reset_timer:
             self._reset_timer()
             self._reset_timer = None
@@ -110,6 +115,8 @@ class IntercomCallBinarySensor(BinarySensorEntity):
                 "Incoming call detected for door %s (%s)", self._door_id, self._name
             )
             self._state = True
+            raw_call_id = event.data.get("CallId") or event.data.get("callId")
+            self._active_call_id = str(raw_call_id).strip() if raw_call_id else None
             self.async_write_ha_state()
             
             if self._reset_timer:
@@ -120,10 +127,23 @@ class IntercomCallBinarySensor(BinarySensorEntity):
             )
 
     @callback
+    def _handle_call_ended(self, event):
+        raw_call_id = event.data.get("CallId") or event.data.get("callId")
+        ended_call_id = str(raw_call_id).strip() if raw_call_id else None
+        if ended_call_id and self._active_call_id and ended_call_id != self._active_call_id:
+            return
+        if self._state:
+            if self._reset_timer:
+                self._reset_timer()
+                self._reset_timer = None
+            self._reset_state(None)
+
+    @callback
     def _reset_state(self, _now):
         _LOGGER.debug(
             "Resetting call state for door %s (%s)", self._door_id, self._name
         )
         self._state = False
+        self._active_call_id = None
         self._reset_timer = None
         self.async_write_ha_state()
