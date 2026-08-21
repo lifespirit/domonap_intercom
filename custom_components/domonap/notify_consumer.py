@@ -228,10 +228,16 @@ class IntercomNotifyConsumer:
             if isinstance(push_data, dict):
                 evt = push_data.get("EventMessage")
                 if evt == "DomofonCalling":
+                    self._api.set_active_call(
+                        push_data.get("CallId") or push_data.get("callId")
+                    )
                     await self._prepare_incoming_call_event(push_data)
                     self._hass.bus.fire(EVENT_INCOMING_CALL, push_data)
                     _LOGGER.info("Incoming call fired: DoorId=%s CallId=%s", push_data.get("DoorId"), push_data.get("CallId"))
                 elif evt == "DomofonCallEnded":
+                    self._api.clear_active_call(
+                        push_data.get("CallId") or push_data.get("callId")
+                    )
                     # После завершения звонка сервер перестаёт слать пуши в это
                     # соединение — переподключаемся, чтобы поймать следующий звонок.
                     _LOGGER.info("Call ended, forcing WS reconnect for next call")

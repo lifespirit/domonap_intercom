@@ -127,6 +127,8 @@ class IntercomAPI:
         self.dom_app = dom_app
         self._refresh_token_invalid: bool = False
         self._refresh_lock = asyncio.Lock()
+        self._active_call_id: Optional[str] = None
+        self._active_call_lock = asyncio.Lock()
         # Порядок и формат заголовков как у DeviceIdInterceptor приложения:
         # dom-app/dom-platform с суффиксом ";", instanceId — БЕЗ ";", плюс
         # device-info с JSON профиля устройства.
@@ -505,6 +507,34 @@ class IntercomAPI:
             return res
         _LOGGER.debug("answer_call_notify(%s) -> %s", call_id, res)
         return {"ok": True, "body": res}
+
+    @property
+    def active_call_id(self) -> Optional[str]:
+        """Return the call currently reported as active by the notification hub."""
+        return self._active_call_id
+
+    def set_active_call(self, call_id: Optional[str]) -> None:
+        """Update the active call reported by the notification hub."""
+        normalized_call_id = str(call_id).strip() if call_id is not None else ""
+        self._active_call_id = normalized_call_id or None
+
+    def clear_active_call(self, call_id: Optional[str] = None) -> None:
+        """Clear the active call, optionally only when its id still matches."""
+        normalized_call_id = str(call_id).strip() if call_id is not None else ""
+        if not normalized_call_id or self._active_call_id == normalized_call_id:
+            self._active_call_id = None
+
+    async def end_active_call(self):
+        """End the current call once and return the API response, if any."""
+        async with self._active_call_lock:
+            call_id = self._active_call_id
+            if not call_id:
+                return None
+
+            result = await self.end_call_notify(call_id)
+            if isinstance(result, dict) and result.get("ok") is True:
+                self.clear_active_call(call_id)
+            return result
 
     async def fetch_external_bytes(
         self,

@@ -84,6 +84,23 @@ def _find_last_call_sensor_entity_id(hass: HomeAssistant, entry_id: str | None) 
     return None
 
 
+async def _end_active_call(api: Any) -> Any:
+    """End an active call without making a successful door opening fail."""
+    call_id = getattr(api, "active_call_id", None)
+    if not call_id:
+        return None
+
+    try:
+        result = await api.end_active_call()
+    except Exception:
+        _LOGGER.exception("Failed to end active call %s after opening the door", call_id)
+        return {"ok": False, "error": "exception"}
+
+    if result is not None and not (isinstance(result, dict) and result.get("ok") is True):
+        _LOGGER.error("Failed to end active call %s after opening the door: %s", call_id, result)
+    return result
+
+
 async def async_setup_actions(hass: HomeAssistant) -> None:
     """Register Domonap actions (services)."""
 
@@ -104,6 +121,7 @@ async def async_setup_actions(hass: HomeAssistant) -> None:
         res: Any = await api.open_relay_by_door_id(door_id)
         if isinstance(res, dict) and res.get("ok") is True:
             _LOGGER.debug("Door relay opened (door_id=%s, entry_id=%s)", door_id, entry_id)
+            await _end_active_call(api)
             return
 
         _LOGGER.error("Failed to open relay by door_id=%s entry_id=%s: %s", door_id, entry_id, res)
@@ -126,6 +144,7 @@ async def async_setup_actions(hass: HomeAssistant) -> None:
         res: Any = await api.open_relay_by_key_id(key_id)
         if isinstance(res, dict) and res.get("ok") is True:
             _LOGGER.debug("Door relay opened (key_id=%s, entry_id=%s)", key_id, entry_id)
+            await _end_active_call(api)
             return
 
         _LOGGER.error("Failed to open relay by key_id=%s entry_id=%s: %s", key_id, entry_id, res)
@@ -159,9 +178,6 @@ async def async_setup_actions(hass: HomeAssistant) -> None:
         door_id = st.state
 
         attrs = st.attributes or {}
-        raw_call_id = attrs.get("CallId")
-        call_id = str(raw_call_id).strip() if raw_call_id is not None else ""
-
         # Try to get a human-friendly door name from sensor attributes.
         door_name = None
         try:
@@ -178,14 +194,10 @@ async def async_setup_actions(hass: HomeAssistant) -> None:
         res: Any = await api.open_relay_by_door_id(door_id)
         ok = isinstance(res, dict) and res.get("ok") is True
 
+        call_id = getattr(api, "active_call_id", None)
         end_call_result: Any = None
-        # Simplified: CallId must be non-empty after strip().
-        if ok and call_id:
-            try:
-                end_call_result = await api.end_call_notify(call_id)
-            except Exception:
-                _LOGGER.exception("end_call_notify failed for call_id=%s", call_id)
-                end_call_result = {"ok": False, "error": "exception"}
+        if ok:
+            end_call_result = await _end_active_call(api)
 
         return {
             "status": "ok" if ok else "error",

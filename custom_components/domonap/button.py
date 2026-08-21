@@ -10,6 +10,24 @@ from .util import extract_phone_digits
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _end_active_call(api) -> None:
+    """Best-effort end of a call after a door was opened."""
+    call_id = getattr(api, "active_call_id", None)
+    if not call_id:
+        return
+
+    try:
+        result = await api.end_active_call()
+        if result is not None and not (isinstance(result, dict) and result.get("ok") is True):
+            _LOGGER.error(
+                "Failed to end active call %s after opening the door: %s",
+                call_id,
+                result,
+            )
+    except Exception:
+        _LOGGER.exception("Failed to end active call %s after opening the door", call_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     entities: list[ButtonEntity] = []
 
@@ -70,19 +88,13 @@ class IntercomOpenLastCallDoor(ButtonEntity):
             return
 
         door_id = state.state
-        raw_call_id = state.attributes.get("CallId") if state.attributes else None
-        call_id = str(raw_call_id).strip() if raw_call_id is not None else ""
         try:
             res = await self._api.open_relay_by_door_id(door_id)
             if not (isinstance(res, dict) and res.get("ok") is True):
                 _LOGGER.error("Failed to open relay by last call door_id=%s: %s", door_id, res)
                 return
 
-            # Simplified: CallId must be non-empty after strip().
-            if call_id:
-                end_res = await self._api.end_call_notify(call_id)
-                if not (isinstance(end_res, dict) and end_res.get("ok") is True):
-                    _LOGGER.error("end_call_notify failed for call_id=%s: %s", call_id, end_res)
+            await _end_active_call(self._api)
 
         except Exception:
             _LOGGER.exception("Error opening relay by last call door_id=%s", door_id)
@@ -124,5 +136,7 @@ class IntercomDoor(ButtonEntity):
             response = await self._api.open_relay_by_key_id(self._key_id)
             if response.get('ok') is not True:
                 _LOGGER.error(f"Failed to open the door {self._name}. Response: {response}")
+                return
+            await _end_active_call(self._api)
         except Exception as e:
             _LOGGER.error(f"Error opening the door {self._name}: {e}")
