@@ -42,6 +42,14 @@ class RubetekPanelRuntimeConsumer(RubetekPanelNotifyConsumer):
                 elif event_message == "DomofonCallEnded":
                     if self._call_controller is not None:
                         await self._call_controller.on_panel_call_ended(call_id)
-                    self._api.clear_active_call(call_id)
+                    destroy = getattr(self._api, "destroy_active_sip_session", None)
+                    if callable(destroy):
+                        await destroy(
+                            call_id,
+                            reason="signalr_call_ended",
+                            terminate_dialog=True,
+                        )
+                    else:
+                        self._api.clear_active_call(call_id)
 
         await super()._handle_invocation(data)
