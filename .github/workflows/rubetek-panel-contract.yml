@@ -21,3 +21,5 @@ jobs:
         run: python -m compileall -q custom_components/domonap
       - name: Run panel API contract tests
         run: python test/test_panel_api.py -v
+      - name: Run external SIP contract tests
+        run: python test/test_external_sip.py -v
