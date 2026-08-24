@@ -10,9 +10,13 @@ CONF_COUNTRY_CODE = "country_code"
 CONF_PHONE_NUMBER = "phone_number"
 CONF_CONFIRM_CODE = "confirm_code"
 CONF_AUTH_MODE = "auth_mode"
+CONF_PANEL_SETUP_MODE = "panel_setup_mode"
+CONF_PANEL_SESSION = "panel_session"
 
 AUTH_MODE_PHONE = "phone"
 AUTH_MODE_PANEL = "panel"
+PANEL_SETUP_CODE = "activation_code"
+PANEL_SETUP_SESSION = "existing_session"
 
 PARAM_ACCESS_TOKEN = "access_token"
 PARAM_REFRESH_TOKEN = "refresh_token"
@@ -23,7 +27,10 @@ PARAM_WEBRTC_PROXY_SECRET = "webrtc_proxy_secret"
 PARAM_AUTH_MODE = "auth_mode"
 PARAM_PANEL_USER_ID = "panel_user_id"
 PARAM_PANEL_NAME = "panel_name"
+PARAM_PANEL_DEVICE_INFO = "panel_device_info"
 EVENT_INCOMING_CALL = "domonap_incoming_call"
+EVENT_CALL_ANSWERED = "domonap_call_answered"
+EVENT_CALL_ENDED = "domonap_call_ended"
 WEBRTC_PROXY = "webrtc_proxy"
 MEDIA_PROXY = "media_proxy"
 
@@ -43,6 +50,8 @@ PANEL_WS_URL = "wss://api.domonap.ru/notificationHub"
 PANEL_WS_KEEPALIVE_INTERVAL = 3
 PANEL_WS_SERVER_TIMEOUT = 300
 PANEL_WS_HANDSHAKE_TIMEOUT = 100
+PANEL_WS_RECONNECT_INITIAL = 2
+PANEL_WS_RECONNECT_MAX = 60
 
 # SignalR keep-alive параметры старого phone/SMS клиента.
 WS_KEEPALIVE_INTERVAL = 15  # секунды
