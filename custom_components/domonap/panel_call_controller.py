@@ -16,7 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 class PanelCallController:
     """Coordinate Domonap Panel SIP, relay actions and an optional Asterisk leg.
 
-    The controller is intentionally outside IntercomAPI.  Authentication and
+    The controller is intentionally outside IntercomAPI. Authentication and
     Domonap REST stay unchanged, while call routing policy can evolve without
     leaking Asterisk-specific behavior into phone/SMS mode.
     """
@@ -64,9 +64,7 @@ class PanelCallController:
         if not self._enabled:
             return
         if not all((self._user, self._domain, self._call_number)):
-            raise ValueError(
-                "External SIP requires user, domain and call number"
-            )
+            raise ValueError("External SIP requires user, domain and call number")
         host, port = parse_host_port(self._domain)
         config = ExternalSipConfig(
             enabled=True,
@@ -130,23 +128,26 @@ class PanelCallController:
             try:
                 await call.hangup(local=True)
             except Exception:
-                _LOGGER.debug("Failed to close external SIP after Panel call ended", exc_info=True)
+                _LOGGER.debug(
+                    "Failed to close external SIP after Panel call ended",
+                    exc_info=True,
+                )
         self._active_call_id = None
         self._active_door_id = None
 
     async def open_door_by_door_id(self, door_id: str) -> Any:
         """Open a door while applying the configured call policy.
 
-        During an external SIP call, relay opening must not answer/terminate the
-        Domonap leg: the external phone owns the conversation lifetime.  Without
-        forwarding, retain the existing panel behavior (answer before open).
+        Only an established external conversation owns the Domonap call
+        lifetime. While the forwarded destination is merely ringing, a regular
+        HA/Telegram relay action keeps the old behavior: answer/open/end.
         """
-        if self.external_call_active:
+        if self.external_call_established:
             return await self._open_panel_relay_only(door_id)
         return await self._api.open_relay_by_door_id(door_id)
 
     async def open_door_by_key_id(self, key_id: str) -> Any:
-        if not self.external_call_active:
+        if not self.external_call_established:
             answer = getattr(self._api, "_answer_active_sip_before_open", None)
             if callable(answer):
                 try:
@@ -157,7 +158,7 @@ class PanelCallController:
 
     def should_end_after_relay(self) -> bool:
         """Return whether an HA relay action should also terminate the call."""
-        return not self.external_call_active
+        return not self.external_call_established
 
     async def _forward_to_external(
         self, panel_call: RubetekPanelSipCall, call_id: str
@@ -242,12 +243,20 @@ class PanelCallController:
                 continue
             key_id = key.get("id")
             if not key_id:
-                return {"ok": False, "error": "Door key has no id", "door_id": wanted}
+                return {
+                    "ok": False,
+                    "error": "Door key has no id",
+                    "door_id": wanted,
+                }
             _LOGGER.debug(
                 "External-call relay DoorId=%s resolved to KeyId=%s", wanted, key_id
             )
             return await self._api.open_relay_by_key_id(str(key_id))
-        return {"ok": False, "error": "No panel key found for DoorId", "door_id": wanted}
+        return {
+            "ok": False,
+            "error": "No panel key found for DoorId",
+            "door_id": wanted,
+        }
 
     @staticmethod
     def _string_value(value: Any) -> str | None:
