@@ -75,7 +75,7 @@
     "step": {
       "init": {
         "title": "Внешний SIP / Asterisk",
-        "description": "При включении Home Assistant регистрируется на указанном SIP-сервере и при входящем вызове Domonap звонит на заданный номер. После ответа аудио проксируется между Domonap и внешним SIP. DTMF 1 открывает дверь и не завершает разговор; открытие двери из Home Assistant/Telegram во время внешнего разговора также не завершает вызов. Вызов Domonap завершается, когда внешний SIP кладёт трубку. Сейчас поддерживается UDP.",
+        "description": "При включении Home Assistant регистрируется на указанном SIP-сервере и при входящем вызове Domonap звонит на заданный номер. Home Assistant мостит только SIP-сигнализацию: исходный SDP Domonap передаётся Asterisk без изменения, а SDP-ответ Asterisk передаётся обратно Domonap без изменения. RTP идёт напрямую между Domonap и Asterisk; NAT, RTP и транскодирование должны быть настроены на Asterisk. DTMF 1 принимается как SIP INFO, открывает дверь и не завершает разговор. Открытие двери из Home Assistant/Telegram во время внешнего разговора также не завершает вызов. Вызов Domonap завершается, когда внешний SIP кладёт трубку. Сейчас поддерживается UDP.",
         "data": {
           "external_sip_enabled": "Принимать звонки домофона на SIP",
           "external_sip_user": "SIP User",
@@ -87,7 +87,7 @@
         "data_description": {
           "external_sip_domain": "Например: 192.168.10.1:5060",
           "external_sip_transport": "На первом этапе поддерживается UDP",
-          "external_sip_call_number": "Например: 100"
+          "external_sip_call_number": "Например: 100; для DTMF 1 настройте SIP leg к Home Assistant на dtmf_mode=info"
         }
       }
     }
