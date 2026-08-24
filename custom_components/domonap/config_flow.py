@@ -4,15 +4,34 @@ import re
 from secrets import token_urlsafe
 from typing import Any, Optional
 
-from .const import DOMAIN, CONF_COUNTRY_CODE, CONF_PHONE_NUMBER, CONF_CONFIRM_CODE, PARAM_REFRESH_EXPIRATION, \
-    PARAM_REFRESH_TOKEN, PARAM_ACCESS_TOKEN, PARAM_WEBRTC_PROXY_SECRET, PARAM_DEVICE_TOKEN, PARAM_INSTANCE_ID
+from .const import (
+    DOMAIN,
+    CONF_COUNTRY_CODE,
+    CONF_PHONE_NUMBER,
+    CONF_CONFIRM_CODE,
+    CONF_AUTH_MODE,
+    AUTH_MODE_PHONE,
+    AUTH_MODE_PANEL,
+    PARAM_REFRESH_EXPIRATION,
+    PARAM_REFRESH_TOKEN,
+    PARAM_ACCESS_TOKEN,
+    PARAM_WEBRTC_PROXY_SECRET,
+    PARAM_DEVICE_TOKEN,
+    PARAM_INSTANCE_ID,
+    PARAM_AUTH_MODE,
+    PARAM_PANEL_USER_ID,
+    PARAM_PANEL_NAME,
+)
 from .api import IntercomAPI, is_android_guid
+from .panel_api import RubetekPanelIntercomAPI
 
 
 class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
+    # Keep schema version 1: old entries remain valid and default to phone mode.
     VERSION = 1
 
     def __init__(self):
+        self._auth_mode = AUTH_MODE_PHONE
         self._country_code = None
         self._phone_number = None
         self._confirm_code = None
@@ -23,6 +42,15 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self._reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
         )
+        self._auth_mode = entry_data.get(PARAM_AUTH_MODE, AUTH_MODE_PHONE)
+
+        if self._auth_mode == AUTH_MODE_PANEL:
+            self._api = RubetekPanelIntercomAPI(
+                instance_id=entry_data.get(PARAM_INSTANCE_ID),
+            )
+            return await self.async_step_panel()
+
+        # Legacy phone/SMS reauth path stays behavior-compatible with main.
         self._country_code = entry_data.get(CONF_COUNTRY_CODE)
         self._phone_number = entry_data.get(CONF_PHONE_NUMBER)
         stored_device_token = entry_data.get(PARAM_DEVICE_TOKEN)
@@ -38,7 +66,8 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             if not self._country_code or not self._phone_number:
-                return await self.async_step_user()
+                self._auth_mode = AUTH_MODE_PHONE
+                return await self.async_step_phone()
             response = await self._send_authorization_code()
             if response is not True:
                 errors["base"] = "authorization_failed"
@@ -52,6 +81,28 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_user(self, user_input=None):
+        """Choose authentication profile for a new integration entry."""
+        if user_input is not None:
+            self._auth_mode = user_input[CONF_AUTH_MODE]
+            if self._auth_mode == AUTH_MODE_PANEL:
+                self._api = RubetekPanelIntercomAPI()
+                return await self.async_step_panel()
+            self._api = IntercomAPI()
+            return await self.async_step_phone()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_AUTH_MODE, default=AUTH_MODE_PHONE
+                    ): vol.In([AUTH_MODE_PHONE, AUTH_MODE_PANEL])
+                }
+            ),
+        )
+
+    async def async_step_phone(self, user_input=None):
+        """Original phone + SMS authorization path."""
         errors = {}
         if user_input is not None:
             self._country_code = self._sanitize_number(user_input[CONF_COUNTRY_CODE])
@@ -69,10 +120,11 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         })
 
         return self.async_show_form(
-            step_id="user", data_schema=data_schema, errors=errors
+            step_id="phone", data_schema=data_schema, errors=errors
         )
 
     async def async_step_confirm(self, user_input=None):
+        """Original SMS confirmation path, kept isolated from panel auth."""
         errors = {}
         if user_input is not None:
             self._confirm_code = user_input[CONF_CONFIRM_CODE]
@@ -90,42 +142,85 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             ):
                 errors["base"] = "confirmation_failed"
             else:
-                data = self._entry_data()
+                data = self._entry_data_phone()
+                title = "+" + self._country_code + " " + self._phone_number
                 if self._reauth_entry is not None:
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry,
-                        title="+" + self._country_code + " " + self._phone_number,
+                        title=title,
                         data=data,
                     )
                     await self.hass.config_entries.async_reload(
                         self._reauth_entry.entry_id
                     )
                     return self.async_abort(reason="reauth_successful")
-                return self.async_create_entry(
-                    title= "+" + self._country_code + " " + self._phone_number,
-                    data=data,
-                )
-
-        data_schema = vol.Schema({
-            vol.Required(CONF_CONFIRM_CODE): str,
-        })
+                return self.async_create_entry(title=title, data=data)
 
         return self.async_show_form(
-            step_id="confirm", data_schema=data_schema, errors=errors
+            step_id="confirm",
+            data_schema=vol.Schema({vol.Required(CONF_CONFIRM_CODE): str}),
+            errors=errors,
+        )
+
+    async def async_step_panel(self, user_input=None):
+        """Rubetek panel provisioning code flow."""
+        errors = {}
+        if user_input is not None:
+            confirm_code = self._sanitize_number(user_input[CONF_CONFIRM_CODE])
+            if len(confirm_code) != 8:
+                errors["base"] = "invalid_panel_code"
+            else:
+                if not isinstance(self._api, RubetekPanelIntercomAPI):
+                    self._api = RubetekPanelIntercomAPI(
+                        instance_id=(
+                            self._reauth_entry.data.get(PARAM_INSTANCE_ID)
+                            if self._reauth_entry is not None
+                            else None
+                        )
+                    )
+                response = await self._api.confirm_panel_authorization(confirm_code)
+                if (
+                    not self._api.access_token
+                    or not self._api.refresh_token
+                    or (
+                        isinstance(response, dict)
+                        and ("errorText" in response or "error" in response)
+                    )
+                ):
+                    errors["base"] = "panel_confirmation_failed"
+                else:
+                    data = self._entry_data_panel()
+                    panel_name = self._api.panel.get("name") or "Rubetek Panel"
+                    if self._reauth_entry is not None:
+                        self.hass.config_entries.async_update_entry(
+                            self._reauth_entry,
+                            title=panel_name,
+                            data=data,
+                        )
+                        await self.hass.config_entries.async_reload(
+                            self._reauth_entry.entry_id
+                        )
+                        return self.async_abort(reason="reauth_successful")
+                    return self.async_create_entry(title=panel_name, data=data)
+
+        return self.async_show_form(
+            step_id="panel",
+            data_schema=vol.Schema({vol.Required(CONF_CONFIRM_CODE): str}),
+            errors=errors,
         )
 
     def _sanitize_number(self, input_string):
-        sanitized = re.sub(r'\D', '', input_string)
-        return sanitized
+        return re.sub(r'\D', '', input_string)
 
     async def _send_authorization_code(self):
         return await self._api.authorize(self._country_code, self._phone_number)
 
-    def _entry_data(self) -> dict[str, Optional[str]]:
+    def _entry_data_phone(self) -> dict[str, Optional[str]]:
         data = dict(self._reauth_entry.data) if self._reauth_entry is not None else {}
         data.setdefault(PARAM_WEBRTC_PROXY_SECRET, token_urlsafe(24))
         data.update(
             {
+                PARAM_AUTH_MODE: AUTH_MODE_PHONE,
                 PARAM_ACCESS_TOKEN: self._api.access_token,
                 PARAM_REFRESH_TOKEN: self._api.refresh_token,
                 PARAM_REFRESH_EXPIRATION: self._api.refresh_expiration_date,
@@ -135,4 +230,26 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PHONE_NUMBER: self._phone_number,
             }
         )
+        data.pop(PARAM_PANEL_USER_ID, None)
+        data.pop(PARAM_PANEL_NAME, None)
+        return data
+
+    def _entry_data_panel(self) -> dict[str, Optional[str]]:
+        data = dict(self._reauth_entry.data) if self._reauth_entry is not None else {}
+        data.setdefault(PARAM_WEBRTC_PROXY_SECRET, token_urlsafe(24))
+        data.update(
+            {
+                PARAM_AUTH_MODE: AUTH_MODE_PANEL,
+                PARAM_ACCESS_TOKEN: self._api.access_token,
+                PARAM_REFRESH_TOKEN: self._api.refresh_token,
+                PARAM_REFRESH_EXPIRATION: self._api.refresh_expiration_date,
+                PARAM_INSTANCE_ID: self._api.instance_id,
+                PARAM_PANEL_USER_ID: self._api.panel.get("userId"),
+                PARAM_PANEL_NAME: self._api.panel.get("name"),
+            }
+        )
+        # Panel provisioning has no mobile push token or phone identity.
+        data.pop(PARAM_DEVICE_TOKEN, None)
+        data.pop(CONF_COUNTRY_CODE, None)
+        data.pop(CONF_PHONE_NUMBER, None)
         return data
