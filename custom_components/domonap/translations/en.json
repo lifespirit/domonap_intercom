@@ -37,21 +37,21 @@
       },
       "panel_setup": {
         "title": "Rubetek panel setup",
-        "description": "A new activation code can be exchanged for a panel session once. If the panel is already activated, an existing session can be imported without reusing the code.",
+        "description": "Request a new 8-digit panel activation code through support in the official Domonap app. The code is exchanged for a panel session once. If the panel is already activated, import a saved session without reusing the code.",
         "data": {
           "panel_setup_mode": "Setup method"
         }
       },
       "panel": {
         "title": "Rubetek panel activation",
-        "description": "Enter the 8-digit panel activation code. The code is used only to obtain the panel session and is not stored in Home Assistant.",
+        "description": "Enter the 8-digit panel activation code received from Domonap support. The code is used only to obtain the panel session and is not stored in Home Assistant.",
         "data": {
           "confirm_code": "Panel activation code"
         }
       },
       "panel_session": {
         "title": "Import existing panel session",
-        "description": "Paste JSON containing instanceId, deviceInfo, panel and completeToken. This does not use an activation code.",
+        "description": "Paste JSON containing instanceId, deviceInfo, panel and completeToken. This does not use an activation code. Do not publish this JSON because it contains credentials.",
         "data": {
           "panel_session": "Panel session JSON"
         }
@@ -75,7 +75,7 @@
     "step": {
       "init": {
         "title": "External SIP / Asterisk",
-        "description": "When enabled, Home Assistant registers on the configured SIP server and calls the configured number for each incoming Domonap call. Home Assistant bridges SIP signaling only: the original Domonap SDP offer is sent to Asterisk unchanged and Asterisk's SDP answer is sent back to Domonap unchanged. RTP flows directly between Domonap and Asterisk; NAT, RTP handling and transcoding belong on Asterisk. DTMF 1 is accepted as SIP INFO, opens the door and keeps the conversation active. Opening the door from Home Assistant/Telegram during an established external call also keeps the call active. The Domonap call ends when the external SIP party hangs up. UDP is currently supported.",
+        "description": "When enabled, Home Assistant registers on the configured SIP server and calls the configured number for each incoming Domonap call. Home Assistant bridges SIP signaling only: the original Domonap SDP offer is sent to Asterisk unchanged and Asterisk's SDP answer is sent back to Domonap unchanged. RTP flows directly between Domonap and Asterisk; NAT, RTP handling and transcoding belong on Asterisk. DTMF 1 is accepted as SIP INFO. A successful door open from DTMF, Home Assistant or Telegram ends the current call on both SIP legs. If the external SIP party hangs up without opening the door, the remaining Domonap call is terminated. UDP is currently supported. SIP support is experimental.",
         "data": {
           "external_sip_enabled": "Receive intercom calls on SIP",
           "external_sip_user": "SIP User",
@@ -86,7 +86,7 @@
         },
         "data_description": {
           "external_sip_domain": "For example: 192.168.10.1:5060",
-          "external_sip_transport": "UDP is supported in the first implementation",
+          "external_sip_transport": "UDP is currently supported",
           "external_sip_call_number": "For example: 100; configure the SIP leg toward Home Assistant with dtmf_mode=info for DTMF 1"
         }
       }
