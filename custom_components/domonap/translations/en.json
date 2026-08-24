@@ -62,6 +62,36 @@
       }
     }
   },
+  "options": {
+    "abort": {
+      "external_sip_panel_only": "External SIP call forwarding is available only for the Rubetek Panel profile"
+    },
+    "error": {
+      "external_sip_user_required": "SIP User is required",
+      "external_sip_domain_required": "SIP domain is required",
+      "external_sip_domain_invalid": "SIP domain must be host or host:port",
+      "external_sip_number_required": "Call number is required"
+    },
+    "step": {
+      "init": {
+        "title": "External SIP / Asterisk",
+        "description": "When enabled, Home Assistant registers on the configured SIP server and calls the configured number for each incoming Domonap call. After answer, audio is proxied between Domonap and the external SIP leg. DTMF 1 opens the door without ending the conversation. Opening the door from Home Assistant/Telegram also keeps the call alive while the external SIP leg is active. The Domonap call ends when the external SIP party hangs up. UDP is currently supported.",
+        "data": {
+          "external_sip_enabled": "Receive intercom calls on SIP",
+          "external_sip_user": "SIP User",
+          "external_sip_password": "SIP Password",
+          "external_sip_domain": "SIP domain",
+          "external_sip_transport": "Transport",
+          "external_sip_call_number": "Call number"
+        },
+        "data_description": {
+          "external_sip_domain": "For example: 192.168.10.1:5060",
+          "external_sip_transport": "UDP is supported in the first implementation",
+          "external_sip_call_number": "For example: 100"
+        }
+      }
+    }
+  },
   "selector": {
     "auth_mode": {
       "options": {
