@@ -53,11 +53,14 @@ def event_belongs_to_entry(
 
     Panel runtime events are tagged with ``config_entry_id`` and must never leak
     into entities owned by another Panel account. Legacy phone/SMS events predate
-    that field, so they intentionally retain the old global-event behavior.
+    that field and therefore accept only untagged events; this also prevents a
+    Panel event from accidentally updating a legacy phone entity that happens to
+    expose the same DoorId.
     """
-    if not panel_scoped:
-        return True
-    return event_data.get("config_entry_id") == entry_id
+    source_entry_id = event_data.get("config_entry_id")
+    if panel_scoped:
+        return source_entry_id == entry_id
+    return source_entry_id is None
 
 
 def migrate_panel_entity_unique_ids(hass, entry: ConfigEntry) -> None:
