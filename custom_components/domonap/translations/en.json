@@ -7,10 +7,23 @@
     "error": {
       "confirmation_failed": "Confirmation failed",
       "authorization_failed": "Invalid authentication",
+      "invalid_panel_code": "Panel code must contain 8 digits",
+      "panel_confirmation_failed": "Rubetek panel activation failed",
       "unknown": "Unexpected error"
     },
     "step": {
       "user": {
+        "title": "Authentication type",
+        "description": "Choose the Domonap profile. The existing phone/SMS flow remains unchanged; Rubetek Panel uses a separate activation code.",
+        "data": {
+          "auth_mode": "Authentication profile"
+        },
+        "data_description": {
+          "auth_mode": "phone — phone number + SMS; panel — 8-digit Rubetek panel code"
+        }
+      },
+      "phone": {
+        "title": "Phone login",
         "data": {
           "country_code": "Country code",
           "phone_number": "Phone number"
@@ -19,6 +32,13 @@
       "confirm": {
         "data": {
           "confirm_code": "Confirm code"
+        }
+      },
+      "panel": {
+        "title": "Rubetek panel activation",
+        "description": "Enter the 8-digit panel activation code. It is used only to obtain a panel session and is not stored by Home Assistant.",
+        "data": {
+          "confirm_code": "Panel activation code"
         }
       },
       "reauth_confirm": {
