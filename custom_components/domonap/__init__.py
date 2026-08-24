@@ -12,6 +12,9 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from .const import (
     DOMAIN,
     API,
+    AUTH_MODE_PHONE,
+    AUTH_MODE_PANEL,
+    PARAM_AUTH_MODE,
     PARAM_ACCESS_TOKEN,
     PARAM_DEVICE_TOKEN,
     PARAM_INSTANCE_ID,
@@ -55,7 +58,6 @@ def _dismiss_reauth_notification(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
-    # Register global actions (services).
     from .actions import async_setup_actions
     from .media_proxy import DomonapMediaProxy, DomonapMediaProxyView
     from .webrtc_proxy import DomonapWebRTCProxy, DomonapWebRTCProxySessionView, DomonapWebRTCProxyView
@@ -74,26 +76,47 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .api import IntercomAPI, is_android_guid
     from .notify_consumer import IntercomNotifyConsumer
+    from .panel_api import RubetekPanelIntercomAPI
+    from .panel_notify_consumer import RubetekPanelNotifyConsumer
 
     hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
-    stored_device_token = entry.data.get(PARAM_DEVICE_TOKEN)
-    api = IntercomAPI(
-        device_token=(
-            stored_device_token if is_android_guid(stored_device_token) else None
-        ),
-        instance_id=entry.data.get(PARAM_INSTANCE_ID),
-    )
+    # Entries created before panel support have no auth_mode and therefore keep
+    # the exact legacy phone/SMS behavior from main.
+    auth_mode = entry.data.get(PARAM_AUTH_MODE, AUTH_MODE_PHONE)
+
+    if auth_mode == AUTH_MODE_PANEL:
+        api = RubetekPanelIntercomAPI(
+            instance_id=entry.data.get(PARAM_INSTANCE_ID),
+        )
+        consumer_cls = RubetekPanelNotifyConsumer
+    else:
+        stored_device_token = entry.data.get(PARAM_DEVICE_TOKEN)
+        api = IntercomAPI(
+            device_token=(
+                stored_device_token if is_android_guid(stored_device_token) else None
+            ),
+            instance_id=entry.data.get(PARAM_INSTANCE_ID),
+        )
+        consumer_cls = IntercomNotifyConsumer
 
     new_data = dict(entry.data)
     if not new_data.get(PARAM_WEBRTC_PROXY_SECRET):
         new_data[PARAM_WEBRTC_PROXY_SECRET] = token_urlsafe(24)
-    if not is_android_guid(new_data.get(PARAM_DEVICE_TOKEN)):
-        if new_data.get(PARAM_DEVICE_TOKEN):
-            _LOGGER.info("Replacing legacy Domonap DeviceToken with Android GUID")
-        new_data[PARAM_DEVICE_TOKEN] = api.device_token
     if not new_data.get(PARAM_INSTANCE_ID):
         new_data[PARAM_INSTANCE_ID] = api.instance_id
+
+    if auth_mode == AUTH_MODE_PANEL:
+        new_data[PARAM_AUTH_MODE] = AUTH_MODE_PANEL
+        # Panel sessions never participate in the mobile push-token lifecycle.
+        new_data.pop(PARAM_DEVICE_TOKEN, None)
+    else:
+        # Preserve the old migration/repair behavior for phone entries.
+        if not is_android_guid(new_data.get(PARAM_DEVICE_TOKEN)):
+            if new_data.get(PARAM_DEVICE_TOKEN):
+                _LOGGER.info("Replacing legacy Domonap DeviceToken with Android GUID")
+            new_data[PARAM_DEVICE_TOKEN] = api.device_token
+
     if new_data != entry.data:
         hass.config_entries.async_update_entry(entry, data=new_data)
 
@@ -111,11 +134,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ) -> None:
         nonlocal setup_complete
         _LOGGER.debug("Updating entry tokens in config_entry data")
-        new_data = dict(entry.data)
-        new_data.setdefault(PARAM_DEVICE_TOKEN, api.device_token)
-        new_data.setdefault(PARAM_INSTANCE_ID, api.instance_id)
+        updated = dict(entry.data)
+        updated.setdefault(PARAM_INSTANCE_ID, api.instance_id)
+        if auth_mode == AUTH_MODE_PANEL:
+            updated[PARAM_AUTH_MODE] = AUTH_MODE_PANEL
+            updated.pop(PARAM_DEVICE_TOKEN, None)
+        else:
+            updated.setdefault(PARAM_DEVICE_TOKEN, api.device_token)
+
         if access_token and refresh_token and refresh_expiration_date:
-            new_data.update(
+            updated.update(
                 {
                     PARAM_ACCESS_TOKEN: access_token,
                     PARAM_REFRESH_TOKEN: refresh_token,
@@ -124,13 +152,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             _dismiss_reauth_notification(hass, entry)
         else:
-            new_data.pop(PARAM_ACCESS_TOKEN, None)
-            new_data.pop(PARAM_REFRESH_TOKEN, None)
-            new_data.pop(PARAM_REFRESH_EXPIRATION, None)
+            updated.pop(PARAM_ACCESS_TOKEN, None)
+            updated.pop(PARAM_REFRESH_TOKEN, None)
+            updated.pop(PARAM_REFRESH_EXPIRATION, None)
             _create_reauth_notification(hass, entry)
             if setup_complete and hasattr(entry, "async_start_reauth"):
                 entry.async_start_reauth(hass)
-        hass.config_entries.async_update_entry(entry, data=new_data)
+        hass.config_entries.async_update_entry(entry, data=updated)
 
     api.token_update_callback = update_entry
     if not api.has_valid_refresh_token():
@@ -138,7 +166,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryAuthFailed(REAUTH_NOTIFICATION_MESSAGE)
     _dismiss_reauth_notification(hass, entry)
 
-    consumer = IntercomNotifyConsumer(
+    consumer = consumer_cls(
         hass,
         api,
         hass.data[DOMAIN].get(MEDIA_PROXY),
@@ -175,7 +203,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
 
-    # If this was the last entry, remove services.
     remaining_entries = [
         key for key in hass.data.get(DOMAIN, {}) if key != WEBRTC_PROXY
     ]
