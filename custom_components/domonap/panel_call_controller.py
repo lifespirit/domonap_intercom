@@ -26,6 +26,7 @@ class PanelCallController:
         hass: HomeAssistant,
         api: Any,
         *,
+        config_entry_id: str,
         enabled: bool = False,
         user: str = "",
         password: str = "",
@@ -35,6 +36,7 @@ class PanelCallController:
     ) -> None:
         self._hass = hass
         self._api = api
+        self._config_entry_id = config_entry_id
         self._enabled = bool(enabled)
         self._user = user.strip()
         self._password = password
@@ -310,7 +312,13 @@ class PanelCallController:
                 )
             elif domonap_task is not None and domonap_ok:
                 _LOGGER.info("Domonap call %s ended after %s", call_id, source)
-                self._hass.bus.fire(EVENT_CALL_ENDED, {"CallId": call_id})
+                self._hass.bus.fire(
+                    EVENT_CALL_ENDED,
+                    {
+                        "CallId": call_id,
+                        "config_entry_id": self._config_entry_id,
+                    },
+                )
             elif domonap_task is not None:
                 _LOGGER.warning(
                     "Domonap call teardown after %s was incomplete: %s",
