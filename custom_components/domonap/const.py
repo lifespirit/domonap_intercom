@@ -9,6 +9,10 @@ API = "api"
 CONF_COUNTRY_CODE = "country_code"
 CONF_PHONE_NUMBER = "phone_number"
 CONF_CONFIRM_CODE = "confirm_code"
+CONF_AUTH_MODE = "auth_mode"
+
+AUTH_MODE_PHONE = "phone"
+AUTH_MODE_PANEL = "panel"
 
 PARAM_ACCESS_TOKEN = "access_token"
 PARAM_REFRESH_TOKEN = "refresh_token"
@@ -16,6 +20,9 @@ PARAM_REFRESH_EXPIRATION = "refresh_expiration_date"
 PARAM_DEVICE_TOKEN = "device_token"
 PARAM_INSTANCE_ID = "instance_id"
 PARAM_WEBRTC_PROXY_SECRET = "webrtc_proxy_secret"
+PARAM_AUTH_MODE = "auth_mode"
+PARAM_PANEL_USER_ID = "panel_user_id"
+PARAM_PANEL_NAME = "panel_name"
 EVENT_INCOMING_CALL = "domonap_incoming_call"
 WEBRTC_PROXY = "webrtc_proxy"
 MEDIA_PROXY = "media_proxy"
@@ -24,17 +31,19 @@ PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.CAMERA, Platform.BINARY_S
 
 RESET_DELAY = 10 # секунды
 
+# Legacy phone/SMS SignalR transport. Keep unchanged for compatibility.
 WS_MESSAGE_END = "\x1e"
 WS_HANDSHAKE_MESSAGE = '{"protocol":"json","version":1}' + WS_MESSAGE_END
 WS_PING_MESSAGE = '{"type":6}' + WS_MESSAGE_END
 WS_URL = "wss://api.domonap.ru/notificationHub/?id="
 
-# SignalR keep-alive параметры (значения по умолчанию клиента Microsoft SignalR).
-# Клиент шлёт app-level ping ({"type":6}) каждые WS_KEEPALIVE_INTERVAL секунд
-# (keepAliveInterval), иначе сервер разрывает соединение по ClientTimeoutInterval.
-# WS_SERVER_TIMEOUT (serverTimeout) — если за это время НЕ пришло ни одного
-# сообщения (включая серверные ping), клиент считает соединение мёртвым, закрывает
-# его и переподключается. Реализуется через aiohttp receive_timeout (без WS
-# control-ping'ов, которых клиент Microsoft SignalR не использует).
+# Rubetek/AOSP panel transport recovered from the APK: direct WebSocket,
+# shouldSkipNegotiate(true), no connectionToken query parameter.
+PANEL_WS_URL = "wss://api.domonap.ru/notificationHub"
+PANEL_WS_KEEPALIVE_INTERVAL = 3
+PANEL_WS_SERVER_TIMEOUT = 300
+PANEL_WS_HANDSHAKE_TIMEOUT = 100
+
+# SignalR keep-alive параметры старого phone/SMS клиента.
 WS_KEEPALIVE_INTERVAL = 15  # секунды
 WS_SERVER_TIMEOUT = 30  # секунды
