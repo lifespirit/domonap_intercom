@@ -1,14 +1,35 @@
 import base64
+import importlib.util
 import json
 import sys
+import types
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+PKG = ROOT / "custom_components" / "domonap"
 
-from custom_components.domonap.panel_api import RubetekPanelIntercomAPI
+custom_components = types.ModuleType("custom_components")
+custom_components.__path__ = [str(ROOT / "custom_components")]
+sys.modules.setdefault("custom_components", custom_components)
 
+domonap_pkg = types.ModuleType("custom_components.domonap")
+domonap_pkg.__path__ = [str(PKG)]
+sys.modules.setdefault("custom_components.domonap", domonap_pkg)
+
+
+def load_module(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, PKG / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+load_module("custom_components.domonap.api", "api.py")
+panel_api = load_module("custom_components.domonap.panel_api", "panel_api.py")
+RubetekPanelIntercomAPI = panel_api.RubetekPanelIntercomAPI
 
 ROLE_CLAIM = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
 NAME_CLAIM = "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
