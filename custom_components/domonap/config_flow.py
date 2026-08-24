@@ -36,7 +36,7 @@ from .const import (
     EXTERNAL_SIP_TRANSPORT_UDP,
 )
 from .api import IntercomAPI, is_android_guid
-from .external_sip import parse_host_port
+from .external_sip_signaling import parse_host_port
 from .panel_api import RubetekPanelIntercomAPI
 
 
