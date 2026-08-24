@@ -20,6 +20,9 @@ from .const import (
     PARAM_INSTANCE_ID,
     PARAM_REFRESH_TOKEN,
     PARAM_REFRESH_EXPIRATION,
+    PARAM_PANEL_USER_ID,
+    PARAM_PANEL_NAME,
+    PARAM_PANEL_DEVICE_INFO,
     MEDIA_PROXY,
     PARAM_WEBRTC_PROXY_SECRET,
     PLATFORMS,
@@ -88,7 +91,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if auth_mode == AUTH_MODE_PANEL:
         api = RubetekPanelIntercomAPI(
             instance_id=entry.data.get(PARAM_INSTANCE_ID),
+            device_info=entry.data.get(PARAM_PANEL_DEVICE_INFO),
         )
+        api.panel = {
+            key: value
+            for key, value in {
+                "userId": entry.data.get(PARAM_PANEL_USER_ID),
+                "name": entry.data.get(PARAM_PANEL_NAME),
+            }.items()
+            if value is not None
+        }
         consumer_cls = RubetekPanelNotifyConsumer
     else:
         stored_device_token = entry.data.get(PARAM_DEVICE_TOKEN)
@@ -108,6 +120,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if auth_mode == AUTH_MODE_PANEL:
         new_data[PARAM_AUTH_MODE] = AUTH_MODE_PANEL
+        new_data[PARAM_PANEL_DEVICE_INFO] = api.device_info
         # Panel sessions never participate in the mobile push-token lifecycle.
         new_data.pop(PARAM_DEVICE_TOKEN, None)
     else:
@@ -138,6 +151,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         updated.setdefault(PARAM_INSTANCE_ID, api.instance_id)
         if auth_mode == AUTH_MODE_PANEL:
             updated[PARAM_AUTH_MODE] = AUTH_MODE_PANEL
+            updated[PARAM_PANEL_DEVICE_INFO] = api.device_info
+            if api.panel.get("userId"):
+                updated[PARAM_PANEL_USER_ID] = api.panel["userId"]
+            if api.panel.get("name"):
+                updated[PARAM_PANEL_NAME] = api.panel["name"]
             updated.pop(PARAM_DEVICE_TOKEN, None)
         else:
             updated.setdefault(PARAM_DEVICE_TOKEN, api.device_token)
