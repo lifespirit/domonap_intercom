@@ -267,6 +267,83 @@ class RubetekPanelIntercomAPI(IntercomAPI):
             "door_id": wanted_door_id,
         }
 
+    async def end_call_notify(self, call_id: str) -> Dict[str, Any]:
+        """Notify the Domonap backend that the active call has ended.
+
+        prodAospRelease CallOrchestrator.endCallSmart() always invokes
+        CallsRepository.notifyCallEnded(callId) in addition to locally ending
+        the SIP leg. The endpoint and request body are recovered directly from
+        the APK.
+        """
+        result = await self._post(
+            "/communication-api/Call/NotifyCallEnded",
+            {"callId": call_id},
+            need_auth=True,
+            expect="text",
+        )
+        if isinstance(result, dict) and "error" in result:
+            return result
+        _LOGGER.debug("Panel notifyCallEnded(%s) -> %s", call_id, result)
+        return {"ok": True, "body": result}
+
+    async def end_active_call(self) -> Dict[str, Any] | None:
+        """End a panel call both server-side and on its local SIP leg.
+
+        The inherited main implementation treats REST notification as a fallback
+        for SIP termination. The tablet APK does both: notifyCallEnded is sent to
+        the backend while CallOrchestrator also hangs up/rejects the SIP call.
+        Keep that corrected behavior isolated to Panel until it is adopted by
+        main for the phone profile as well.
+        """
+        async with self._active_call_lock:
+            call_id = self._active_call_id
+            if not call_id:
+                return None
+
+            sip_call = self._active_sip_call
+            try:
+                notify_result = await self.end_call_notify(call_id)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Panel NotifyCallEnded failed for %s: %s", call_id, err
+                )
+                notify_result = {"ok": False, "error": str(err)}
+
+            sip_result: Any = None
+            if sip_call is not None:
+                if sip_call.has_invite:
+                    try:
+                        sip_result = await sip_call.end(timeout=1.0)
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Panel SIP termination failed for %s: %s", call_id, err
+                        )
+                        sip_result = {"ok": False, "error": str(err)}
+                else:
+                    # NotifyCallEnded is the authoritative server-side action.
+                    # Do not wait five seconds for a SIP INVITE after the backend
+                    # has already been told to terminate the call.
+                    sip_result = {
+                        "ok": False,
+                        "skipped": True,
+                        "reason": "no_sip_invite",
+                        "registered": sip_call.registered,
+                    }
+
+            notify_ok = (
+                isinstance(notify_result, dict)
+                and notify_result.get("ok") is True
+            )
+            sip_ok = isinstance(sip_result, dict) and sip_result.get("ok") is True
+            result = {
+                "ok": notify_ok or sip_ok,
+                "notify": notify_result,
+                "sip": sip_result,
+            }
+            if result["ok"]:
+                self.clear_active_call(call_id)
+            return result
+
     async def logout(self) -> Dict[str, Any]:
         """Explicitly invalidate a panel session.
 
