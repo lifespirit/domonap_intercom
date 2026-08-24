@@ -15,11 +15,16 @@ _SIP_URI_RE = re.compile(r"<(sips?:[^>]+)>|(sips?:[^;,\s]+)", re.IGNORECASE)
 
 
 class RubetekPanelSipCall(DomonapSipCall):
-    """Panel SIP leg with the answer -> open -> BYE lifecycle used by the APK.
+    """Panel SIP leg with the lifecycle used by the Rubetek APK.
 
-    The generic DomonapSipCall from main is intentionally left untouched.  For
+    The generic DomonapSipCall from main is intentionally left untouched. For
     optional Asterisk forwarding this class exposes the original SDP offer and
-    accepts an externally supplied SDP answer.  It never proxies RTP itself.
+    accepts an externally supplied SDP answer. It never proxies RTP itself.
+
+    The APK treats the SIP account as a per-call object: after terminating the
+    current dialog it disables registration/removes the account and stops the SIP
+    core. ``destroy()`` mirrors that behavior by terminating the dialog, sending
+    REGISTER with Expires: 0 and only then closing the TCP session.
     """
 
     def __init__(self, account: str, password: str, domain: str, port: int) -> None:
@@ -29,6 +34,11 @@ class RubetekPanelSipCall(DomonapSipCall):
         self._bye_response_event = asyncio.Event()
         self._bye_response_status: int | None = None
         self._bye_cseq = 1
+        self._unregister_response_event = asyncio.Event()
+        self._unregister_response: _SipMessage | None = None
+        self._unregister_cseq: int | None = None
+        self._destroy_lock = asyncio.Lock()
+        self._destroyed = False
 
     @property
     def answered(self) -> bool:
@@ -55,9 +65,9 @@ class RubetekPanelSipCall(DomonapSipCall):
     ) -> dict[str, Any]:
         """Accept the pending INVITE without setting up an RTP endpoint.
 
-        This path is used when external SIP forwarding is disabled.  The call is
+        This path is used when external SIP forwarding is disabled. The call is
         answered only so the relay-open flow can reproduce the panel lifecycle,
-        then it is immediately terminated.  SDP therefore advertises discard
+        then it is immediately terminated. SDP therefore advertises discard
         port 9 instead of opening a media socket in Home Assistant.
         """
         invite = await self._wait_invite(timeout)
@@ -79,7 +89,7 @@ class RubetekPanelSipCall(DomonapSipCall):
     ) -> dict[str, Any]:
         """Accept the Domonap INVITE with Asterisk's SDP answer unchanged.
 
-        No RTP address, port, payload type or codec is rewritten here.  Asterisk
+        No RTP address, port, payload type or codec is rewritten here. Asterisk
         is therefore the media endpoint visible to Domonap and is responsible
         for RTP/NAT/transcoding toward the final extension.
         """
@@ -155,8 +165,9 @@ class RubetekPanelSipCall(DomonapSipCall):
         }
 
     async def end(self, timeout: float = 2.0) -> dict[str, Any]:
-        """End an answered panel call with BYE; reject only if never answered."""
+        """Terminate the current SIP dialog but keep registration alive."""
         if not self._answered:
+            _LOGGER.debug("Panel SIP dialog is still ringing; terminating as reject")
             return await super().end(timeout=timeout)
         if self._ended:
             return {
@@ -210,16 +221,204 @@ class RubetekPanelSipCall(DomonapSipCall):
             "ack": self._ack_event.is_set(),
         }
 
+    async def unregister(self, timeout: float = 2.0) -> dict[str, Any]:
+        """Remove the temporary per-call SIP registration.
+
+        The APK disables registration and removes the account when a call session
+        is destroyed. On the wire the equivalent operation is REGISTER with
+        Expires: 0 for the same Contact.
+        """
+        if not self.registered:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "not_registered",
+                "method": "sip_unregister",
+            }
+        if self._writer is None:
+            return {
+                "ok": False,
+                "error": "sip_connection_closed_before_unregister",
+                "method": "sip_unregister",
+            }
+
+        response: _SipMessage | None = None
+        for attempt in range(2):
+            self._cseq += 1
+            cseq = self._cseq
+            self._unregister_cseq = cseq
+            self._unregister_response = None
+            self._unregister_response_event.clear()
+
+            branch = f"z9hG4bK{token_hex(12)}"
+            host = self._format_host(self._local_host)
+            request_uri = f"sip:{self._domain}:{self._port}"
+            identity = f"sip:{self._account}@{self._domain}"
+            contact = f"sip:{self._account}@{host}:{self._local_port};transport=tcp"
+            headers = [
+                f"Via: SIP/2.0/TCP {host}:{self._local_port};branch={branch};rport;alias",
+                "Max-Forwards: 70",
+                f"From: <{identity}>;tag={self._from_tag}",
+                f"To: <{identity}>",
+                f"Call-ID: {self._register_call_id}",
+                f"CSeq: {cseq} REGISTER",
+                f"Contact: <{contact}>;expires=0",
+                "Expires: 0",
+                "Supported: path, outbound, gruu",
+                "User-Agent: Domonap Home Assistant",
+            ]
+            if self._auth is not None:
+                authorization = self._digest_authorization("REGISTER", request_uri)
+                headers.append(f"{self._auth_header}: {authorization}")
+
+            _LOGGER.info("Domonap panel SIP UNREGISTER sent (CSeq=%s)", cseq)
+            await self._send(f"REGISTER {request_uri} SIP/2.0", headers)
+            try:
+                await asyncio.wait_for(
+                    self._unregister_response_event.wait(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Domonap panel SIP UNREGISTER response timeout")
+                return {
+                    "ok": False,
+                    "error": "sip_unregister_response_timeout",
+                    "method": "sip_unregister",
+                }
+
+            response = self._unregister_response
+            if response is None:
+                return {
+                    "ok": False,
+                    "error": "sip_unregister_response_missing",
+                    "method": "sip_unregister",
+                }
+
+            status = self._status_code(response)
+            if status in (401, 407) and attempt == 0:
+                challenge_name = (
+                    "www-authenticate" if status == 401 else "proxy-authenticate"
+                )
+                challenge = response.first(challenge_name)
+                if not challenge:
+                    return {
+                        "ok": False,
+                        "status": status,
+                        "error": "sip_unregister_auth_challenge_missing",
+                        "method": "sip_unregister",
+                    }
+                self._auth = self._parse_digest(challenge)
+                self._auth_header = (
+                    "Authorization" if status == 401 else "Proxy-Authorization"
+                )
+                continue
+
+            ok = 200 <= status < 300
+            if ok:
+                self._registered_event.clear()
+                _LOGGER.info("Domonap panel SIP registration removed with %s", status)
+            else:
+                _LOGGER.warning("Domonap panel SIP UNREGISTER failed with %s", status)
+            return {
+                "ok": ok,
+                "status": status,
+                "method": "sip_unregister",
+            }
+
+        status = self._status_code(response) if response is not None else 0
+        return {
+            "ok": False,
+            "status": status,
+            "method": "sip_unregister",
+        }
+
+    async def destroy(
+        self,
+        *,
+        timeout: float = 2.0,
+        terminate_dialog: bool = True,
+        reason: str = "call_end",
+    ) -> dict[str, Any]:
+        """Terminate dialog, unregister account and close the SIP TCP session."""
+        async with self._destroy_lock:
+            if self._destroyed:
+                return {
+                    "ok": True,
+                    "already_destroyed": True,
+                    "method": "sip_destroy",
+                }
+
+            _LOGGER.info(
+                "Destroying Domonap panel SIP session reason=%s answered=%s invite=%s registered=%s",
+                reason,
+                self._answered,
+                self.has_invite,
+                self.registered,
+            )
+
+            terminate_result: dict[str, Any] | None = None
+            if terminate_dialog and self.has_invite and not self._ended:
+                try:
+                    terminate_result = await self.end(timeout=timeout)
+                except Exception as err:
+                    _LOGGER.warning("Panel SIP dialog termination failed: %s", err)
+                    terminate_result = {"ok": False, "error": str(err)}
+
+            try:
+                unregister_result = await self.unregister(timeout=timeout)
+            except Exception as err:
+                _LOGGER.warning("Panel SIP unregister failed: %s", err)
+                unregister_result = {"ok": False, "error": str(err)}
+
+            await self.stop()
+            self._destroyed = True
+            self._invite = None
+            self._invite_event.set()
+
+            terminate_ok = (
+                terminate_result is None
+                or (isinstance(terminate_result, dict) and terminate_result.get("ok") is True)
+            )
+            unregister_ok = (
+                isinstance(unregister_result, dict)
+                and unregister_result.get("ok") is True
+            )
+            result = {
+                "ok": terminate_ok and unregister_ok,
+                "method": "sip_destroy",
+                "terminate": terminate_result,
+                "unregister": unregister_result,
+            }
+            _LOGGER.info(
+                "Domonap panel SIP session destroyed terminate_ok=%s unregister_ok=%s",
+                terminate_ok,
+                unregister_ok,
+            )
+            return result
+
     async def _handle_message(self, message: _SipMessage) -> None:
         if message.start_line.startswith("SIP/2.0"):
             cseq = message.first("cseq") or ""
-            if cseq.upper().endswith(" BYE"):
+            cseq_upper = cseq.upper()
+            if cseq_upper.endswith(" BYE"):
                 self._bye_response_status = self._status_code(message)
                 self._bye_response_event.set()
                 _LOGGER.debug(
                     "Panel SIP BYE response: %s", self._bye_response_status
                 )
                 return
+            if cseq_upper.endswith(" REGISTER") and self._unregister_cseq is not None:
+                try:
+                    response_cseq = int(cseq.split(None, 1)[0])
+                except (ValueError, IndexError):
+                    response_cseq = -1
+                if response_cseq == self._unregister_cseq:
+                    self._unregister_response = message
+                    self._unregister_response_event.set()
+                    _LOGGER.debug(
+                        "Panel SIP UNREGISTER response: %s",
+                        self._status_code(message),
+                    )
+                    return
         else:
             method = message.start_line.split(" ", 1)[0].upper()
             if method == "ACK":
