@@ -7,10 +7,23 @@
     "error": {
       "confirmation_failed": "Ошибка подтверждения",
       "authorization_failed": "Ошибка аутентификации",
+      "invalid_panel_code": "Код панели должен содержать 8 цифр",
+      "panel_confirmation_failed": "Не удалось активировать Rubetek-панель",
       "unknown": "Неизвестная ошибка"
     },
     "step": {
       "user": {
+        "title": "Тип авторизации",
+        "description": "Выберите профиль Domonap. Старый вариант по номеру телефона остаётся без изменений; Rubetek Panel использует отдельный код активации.",
+        "data": {
+          "auth_mode": "Профиль авторизации"
+        },
+        "data_description": {
+          "auth_mode": "phone — номер телефона + SMS; panel — 8-значный код Rubetek-панели"
+        }
+      },
+      "phone": {
+        "title": "Вход по номеру телефона",
         "data": {
           "country_code": "Код страны",
           "phone_number": "Номер телефона"
@@ -21,9 +34,24 @@
           "confirm_code": "Код подтверждения"
         }
       },
+      "panel": {
+        "title": "Активация Rubetek-панели",
+        "description": "Введите 8-значный код активации панели. Код используется только для получения panel-сессии и не сохраняется в Home Assistant.",
+        "data": {
+          "confirm_code": "Код активации панели"
+        }
+      },
       "reauth_confirm": {
         "title": "Повторная авторизация",
         "description": "Для интеграции Domonap необходимо повторно подтвердить авторизацию. После продолжения код подтверждения будет отправлен на сохраненный номер телефона."
+      }
+    }
+  },
+  "selector": {
+    "auth_mode": {
+      "options": {
+        "phone": "Номер телефона + SMS",
+        "panel": "Rubetek Panel"
       }
     }
   },
