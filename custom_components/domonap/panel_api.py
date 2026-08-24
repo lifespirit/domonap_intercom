@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -8,6 +9,7 @@ from secrets import token_hex
 from typing import Any, Dict, Optional
 
 from .api import IntercomAPI, SIGNALR_USER_AGENT
+from .panel_sip import RubetekPanelSipCall
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -224,13 +226,89 @@ class RubetekPanelIntercomAPI(IntercomAPI):
             },
         }
 
+    def start_active_sip_call(self, push_data: dict[str, Any]) -> None:
+        """Start the panel SIP registration with the APK-compatible call flow."""
+        raw_call_id = push_data.get("CallId") or push_data.get("callId")
+        call_id = str(raw_call_id).strip() if raw_call_id is not None else ""
+        if (
+            call_id
+            and call_id == self._active_sip_call_id
+            and self._active_sip_call is not None
+        ):
+            return
+
+        sip_data = push_data.get("SipData") or push_data.get("sipData") or push_data
+        if not isinstance(sip_data, dict):
+            return
+        account = (
+            sip_data.get("SipAccount")
+            or sip_data.get("sipAccount")
+            or sip_data.get("account")
+        )
+        password = (
+            sip_data.get("SipPassword")
+            or sip_data.get("sipPassword")
+            or sip_data.get("password")
+        )
+        domain = (
+            sip_data.get("SipDomain")
+            or sip_data.get("sipDomain")
+            or sip_data.get("domain")
+        )
+        raw_port = (
+            sip_data.get("SipPort")
+            or sip_data.get("sipPort")
+            or sip_data.get("port")
+        )
+        if not all((account, password, domain, raw_port)):
+            _LOGGER.debug("Incoming panel call does not contain complete SIP credentials")
+            return
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            _LOGGER.warning("Invalid Domonap panel SIP port: %s", raw_port)
+            return
+
+        previous = self._active_sip_call
+        if previous is not None:
+            asyncio.create_task(previous.stop())
+        self._active_sip_call = RubetekPanelSipCall(
+            str(account), str(password), str(domain), port
+        )
+        self._active_sip_call_id = call_id or self._active_call_id
+        self._active_sip_call.start()
+
+    async def _answer_active_sip_before_open(self) -> Dict[str, Any] | None:
+        """Answer the ringing SIP leg before opening, matching the panel APK."""
+        sip_call = self._active_sip_call
+        if not self._active_call_id or not isinstance(sip_call, RubetekPanelSipCall):
+            return None
+        try:
+            result = await sip_call.answer(timeout=2.0)
+        except Exception as err:
+            _LOGGER.warning("Panel SIP answer before relay opening failed: %s", err)
+            return {"ok": False, "error": str(err)}
+        if not (isinstance(result, dict) and result.get("ok") is True):
+            _LOGGER.warning("Panel SIP answer before relay opening failed: %s", result)
+        else:
+            _LOGGER.info(
+                "Panel SIP call %s answered before relay opening",
+                self._active_call_id,
+            )
+        return result
+
     async def open_relay_by_door_id(self, door_id: str):
         """Open a panel relay by resolving DoorId to the user's KeyId first.
 
-        The activated panel session was observed successfully opening relays via
-        /client-api/Device/OpenRelayByKeyId. Keep this workaround isolated to
-        the panel profile so the legacy phone/SMS API contract is unchanged.
+        The Rubetek incoming-call UI answers the SIP call before requesting the
+        relay opening, then invokes endCallSmart() after a successful open.  That
+        ordering matters for forked calls: rejecting our still-ringing branch
+        does not stop the originating panel while accepting it does.
         """
+        # Best effort only: a SIP problem must never prevent the requested door
+        # from opening.
+        await self._answer_active_sip_before_open()
+
         keys_response = await self.get_paged_keys()
         if not isinstance(keys_response, dict):
             return {
@@ -268,13 +346,7 @@ class RubetekPanelIntercomAPI(IntercomAPI):
         }
 
     async def end_call_notify(self, call_id: str) -> Dict[str, Any]:
-        """Notify the Domonap backend that the active call has ended.
-
-        prodAospRelease CallOrchestrator.endCallSmart() always invokes
-        CallsRepository.notifyCallEnded(callId) in addition to locally ending
-        the SIP leg. The endpoint and request body are recovered directly from
-        the APK.
-        """
+        """Notify the Domonap backend that the active call has ended."""
         result = await self._post(
             "/communication-api/Call/NotifyCallEnded",
             {"callId": call_id},
@@ -287,14 +359,7 @@ class RubetekPanelIntercomAPI(IntercomAPI):
         return {"ok": True, "body": result}
 
     async def end_active_call(self) -> Dict[str, Any] | None:
-        """End a panel call both server-side and on its local SIP leg.
-
-        The inherited main implementation treats REST notification as a fallback
-        for SIP termination. The tablet APK does both: notifyCallEnded is sent to
-        the backend while CallOrchestrator also hangs up/rejects the SIP call.
-        Keep that corrected behavior isolated to Panel until it is adopted by
-        main for the phone profile as well.
-        """
+        """End a panel call using the same REST + SIP lifecycle as the APK."""
         async with self._active_call_lock:
             call_id = self._active_call_id
             if not call_id:
@@ -310,19 +375,17 @@ class RubetekPanelIntercomAPI(IntercomAPI):
                 notify_result = {"ok": False, "error": str(err)}
 
             sip_result: Any = None
+            sip_expected = sip_call is not None and sip_call.has_invite
             if sip_call is not None:
                 if sip_call.has_invite:
                     try:
-                        sip_result = await sip_call.end(timeout=1.0)
+                        sip_result = await sip_call.end(timeout=2.0)
                     except Exception as err:
                         _LOGGER.warning(
                             "Panel SIP termination failed for %s: %s", call_id, err
                         )
                         sip_result = {"ok": False, "error": str(err)}
                 else:
-                    # NotifyCallEnded is the authoritative server-side action.
-                    # Do not wait five seconds for a SIP INVITE after the backend
-                    # has already been told to terminate the call.
                     sip_result = {
                         "ok": False,
                         "skipped": True,
@@ -335,12 +398,15 @@ class RubetekPanelIntercomAPI(IntercomAPI):
                 and notify_result.get("ok") is True
             )
             sip_ok = isinstance(sip_result, dict) and sip_result.get("ok") is True
+            # NotifyCallEnded by itself only updates the backend notification
+            # state; the live SIP dialog must end successfully when it exists.
+            ok = sip_ok if sip_expected else notify_ok
             result = {
-                "ok": notify_ok or sip_ok,
+                "ok": ok,
                 "notify": notify_result,
                 "sip": sip_result,
             }
-            if result["ok"]:
+            if ok:
                 self.clear_active_call(call_id)
             return result
 
