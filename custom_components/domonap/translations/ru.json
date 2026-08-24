@@ -62,6 +62,36 @@
       }
     }
   },
+  "options": {
+    "abort": {
+      "external_sip_panel_only": "Переадресация звонков по SIP доступна только для профиля Rubetek Panel"
+    },
+    "error": {
+      "external_sip_user_required": "Укажите SIP User",
+      "external_sip_domain_required": "Укажите SIP domain",
+      "external_sip_domain_invalid": "SIP domain должен иметь вид host или host:port",
+      "external_sip_number_required": "Укажите номер, на который звонить"
+    },
+    "step": {
+      "init": {
+        "title": "Внешний SIP / Asterisk",
+        "description": "При включении Home Assistant регистрируется на указанном SIP-сервере и при входящем вызове Domonap звонит на заданный номер. После ответа аудио проксируется между Domonap и внешним SIP. DTMF 1 открывает дверь и не завершает разговор; открытие двери из Home Assistant/Telegram во время внешнего разговора также не завершает вызов. Вызов Domonap завершается, когда внешний SIP кладёт трубку. Сейчас поддерживается UDP.",
+        "data": {
+          "external_sip_enabled": "Принимать звонки домофона на SIP",
+          "external_sip_user": "SIP User",
+          "external_sip_password": "SIP Password",
+          "external_sip_domain": "SIP domain",
+          "external_sip_transport": "Transport",
+          "external_sip_call_number": "Номер для звонка"
+        },
+        "data_description": {
+          "external_sip_domain": "Например: 192.168.10.1:5060",
+          "external_sip_transport": "На первом этапе поддерживается UDP",
+          "external_sip_call_number": "Например: 100"
+        }
+      }
+    }
+  },
   "selector": {
     "auth_mode": {
       "options": {
