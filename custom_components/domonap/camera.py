@@ -25,6 +25,7 @@ except ImportError:
     WebRTCSendMessage = None
 
 from .const import API, DOMAIN, PARAM_WEBRTC_PROXY_SECRET, WEBRTC_PROXY
+from .util import scoped_entity_unique_id
 from .webrtc_proxy import _resolve_upstream_session_url
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,12 +61,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     proxy = hass.data[DOMAIN][WEBRTC_PROXY]
     proxy_secret = config_entry.data.get(PARAM_WEBRTC_PROXY_SECRET)
     key_response = await api.get_paged_keys()
-    key_entities = _build_key_camera_entities(api, proxy, proxy_secret, key_response)
+    key_entities = _build_key_camera_entities(
+        config_entry,
+        api,
+        proxy,
+        proxy_secret,
+        key_response,
+    )
     if key_entities:
         async_add_entities(key_entities, True)
 
     video_areas_response = await api.get_video_area()
     video_entities = await _build_video_camera_entities(
+        config_entry,
         api,
         proxy,
         proxy_secret,
@@ -77,7 +85,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     return True
 
 
-def _build_key_camera_entities(api, proxy, proxy_secret: str | None, response) -> list[Camera]:
+def _build_key_camera_entities(
+    config_entry,
+    api,
+    proxy,
+    proxy_secret: str | None,
+    response,
+) -> list[Camera]:
     if isinstance(response, Exception):
         _LOGGER.exception("Failed to load Domonap key cameras", exc_info=response)
         return []
@@ -116,13 +130,23 @@ def _build_key_camera_entities(api, proxy, proxy_secret: str | None, response) -
                 key,
                 proxy=proxy,
                 proxy_secret=proxy_secret,
+                entity_unique_id=scoped_entity_unique_id(
+                    config_entry,
+                    str(key_id),
+                ),
             )
         )
 
     return entities
 
 
-async def _build_video_camera_entities(api, proxy, proxy_secret: str | None, response) -> list[Camera]:
+async def _build_video_camera_entities(
+    config_entry,
+    api,
+    proxy,
+    proxy_secret: str | None,
+    response,
+) -> list[Camera]:
     if isinstance(response, Exception):
         _LOGGER.exception("Failed to load Domonap video areas", exc_info=response)
         return []
@@ -183,6 +207,7 @@ async def _build_video_camera_entities(api, proxy, proxy_secret: str | None, res
         category_name = CAMERA_CATEGORY_NAMES.get(category, category)
         for camera in category_response:
             entity = _make_video_camera_entity(
+                config_entry,
                 api,
                 proxy,
                 proxy_secret,
@@ -200,6 +225,7 @@ async def _build_video_camera_entities(api, proxy, proxy_secret: str | None, res
 
 
 def _make_video_camera_entity(
+    config_entry,
     api,
     proxy,
     proxy_secret: str | None,
@@ -237,6 +263,10 @@ def _make_video_camera_entity(
         camera_data,
         proxy=proxy,
         proxy_secret=proxy_secret,
+        entity_unique_id=scoped_entity_unique_id(
+            config_entry,
+            entity_unique_id,
+        ),
         device_identifier=entity_unique_id,
         device_name=name,
         device_model="Video Camera",
@@ -271,6 +301,7 @@ class IntercomCamera(Camera):
         proxy=None,
         proxy_secret: str | None = None,
         *,
+        entity_unique_id: str | None = None,
         device_identifier: str | None = None,
         device_name: str | None = None,
         device_model: str = "Intercom Device",
@@ -280,6 +311,7 @@ class IntercomCamera(Camera):
         super().__init__()
         self._api = api
         self._key_id = key_id
+        self._entity_unique_id = entity_unique_id or key_id
         self._name = name
         self._stream_url = stream_url
         self._snapshot_url = snapshot_url
@@ -307,7 +339,7 @@ class IntercomCamera(Camera):
 
     @property
     def unique_id(self):
-        return self._key_id
+        return self._entity_unique_id
 
     async def async_camera_image(self, width=None, height=None):
         if not self._snapshot_url:

@@ -9,7 +9,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN, API, EVENT_INCOMING_CALL
-from .util import extract_phone_digits
+from .util import (
+    event_belongs_to_entry,
+    extract_phone_digits,
+    panel_entity_prefix,
+    scoped_entity_unique_id,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -17,6 +22,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     entities: list[SensorEntity] = []
     api = hass.data[DOMAIN][config_entry.entry_id][API]
+    panel_scoped = bool(panel_entity_prefix(config_entry))
 
     response = await api.get_paged_keys()
     keys = response.get("results", [])
@@ -43,14 +49,35 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
                     device_name=door_name,
                     pin=pin,
                     key_data=key,
-                ))
+                    unique_id=scoped_entity_unique_id(
+                        config_entry,
+                        f"{door_id}_door_code",
+                    ),
+                )
+            )
 
         except Exception:
             _LOGGER.exception("Failed to create PIN sensor from key payload: %s", key)
 
     # One per config entry: stores the last DoorId that rang.
     phone_digits = extract_phone_digits(config_entry)
-    entities.append(DomonapLastCallDoorIdSensor(hass, config_entry.entry_id, phone_digits))
+    raw_last_call_unique_id = (
+        f"{phone_digits}_last_call_door_id"
+        if phone_digits
+        else f"{config_entry.entry_id}_last_call_door_id"
+    )
+    entities.append(
+        DomonapLastCallDoorIdSensor(
+            hass,
+            config_entry.entry_id,
+            phone_digits,
+            panel_scoped=panel_scoped,
+            unique_id=scoped_entity_unique_id(
+                config_entry,
+                raw_last_call_unique_id,
+            ),
+        )
+    )
 
     async_add_entities(entities, True)
 
@@ -61,16 +88,26 @@ class DomonapDoorCodeSensor(SensorEntity):
     _attr_translation_key = "door_code"
     _attr_should_poll = False
 
-    def __init__(self, key_id: str, door_id: str, device_name: str, pin: str, key_data: dict):
+    def __init__(
+        self,
+        key_id: str,
+        door_id: str,
+        device_name: str,
+        pin: str,
+        key_data: dict,
+        *,
+        unique_id: str,
+    ):
         self._key_id = key_id
         self._door_id = door_id
         self._device_name = device_name
         self._pin = pin
         self._key_data = key_data
+        self._unique_id = unique_id
 
     @property
     def unique_id(self) -> str:
-        return f"{self._door_id}_door_code"
+        return self._unique_id
 
     @property
     def native_value(self) -> str | None:
@@ -83,7 +120,6 @@ class DomonapDoorCodeSensor(SensorEntity):
 
     @property
     def device_info(self):
-        # Имя устройства — это "дверь". Сущность будет называться "<device>: <translated entity name>"
         return {
             "identifiers": {(DOMAIN, self._key_id)},
             "name": self._device_name,
@@ -100,18 +136,26 @@ class DomonapLastCallDoorIdSensor(SensorEntity):
     _attr_translation_key = "last_call_door_id"
     _attr_should_poll = False
 
-    def __init__(self, hass: HomeAssistant, entry_id: str, phone_digits: str | None):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry_id: str,
+        phone_digits: str | None,
+        *,
+        panel_scoped: bool,
+        unique_id: str,
+    ):
         self._hass = hass
         self._entry_id = entry_id
         self._phone_digits = phone_digits
+        self._panel_scoped = panel_scoped
+        self._unique_id = unique_id
         self._state: str | None = None
         self._attrs: dict[str, Any] = {}
         self._unsub = None
 
     @property
     def device_info(self):
-        # Отображаем сенсор как часть устройства-аккаунта (телефон).
-        # Идентификатор должен быть стабильным и уникальным.
         phone = self._phone_digits or self._entry_id
         return {
             "identifiers": {(DOMAIN, phone)},
@@ -122,14 +166,10 @@ class DomonapLastCallDoorIdSensor(SensorEntity):
 
     @property
     def unique_id(self) -> str:
-        # Required by the task: base it on phone digits.
-        if self._phone_digits:
-            return f"{self._phone_digits}_last_call_door_id"
-        return f"{self._entry_id}_last_call_door_id"
+        return self._unique_id
 
     @property
     def suggested_object_id(self) -> str | None:
-        # Enforces entity_id like sensor.<phone_digits>_last_call_door_id
         if self._phone_digits:
             return f"{self._phone_digits}_last_call_door_id"
         return None
@@ -152,15 +192,18 @@ class DomonapLastCallDoorIdSensor(SensorEntity):
 
     @callback
     def _handle_incoming_call(self, event) -> None:
-        # Store DoorId as main state and keep the whole event payload as attributes.
+        if not event_belongs_to_entry(
+            event.data,
+            self._entry_id,
+            panel_scoped=self._panel_scoped,
+        ):
+            return
+
         door_id = event.data.get("DoorId")
         if not door_id:
             return
 
         self._state = str(door_id)
-
-        # event.data should be JSON-serializable (dict with simple values). Keep it as-is.
-        # Add our own timestamp of when HA processed the event.
         attrs = dict(event.data)
         attrs["ts"] = datetime.now(timezone.utc).isoformat() + "Z"
 
