@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, API, EVENT_INCOMING_CALL
+from .util import event_belongs_to_entry, panel_entity_prefix, scoped_entity_unique_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,12 +17,12 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     entities: list[IntercomCallImageEntity] = []
     api = hass.data[DOMAIN][config_entry.entry_id][API]
+    panel_scoped = bool(panel_entity_prefix(config_entry))
 
     response = await api.get_paged_keys()
     keys = response.get("results", [])
 
     for key in keys:
-        # создаём сущность только если есть стартовый превью-URL
         if key.get("videoPreview") is not None:
             key_id: str = key["id"]
             door_id: str = key["doorId"]
@@ -37,6 +38,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
                     device_name=door_name,
                     photo_url=photo_url,
                     key_data=key,
+                    entry_id=config_entry.entry_id,
+                    panel_scoped=panel_scoped,
+                    unique_id=scoped_entity_unique_id(
+                        config_entry,
+                        f"{door_id}_photo",
+                    ),
                 )
             )
 
@@ -57,6 +64,10 @@ class IntercomCallImageEntity(ImageEntity):
         device_name: str,
         photo_url: Optional[str] = None,
         key_data: dict = None,
+        *,
+        entry_id: str,
+        panel_scoped: bool,
+        unique_id: str,
     ):
         super().__init__(hass)
         self._api = api
@@ -65,6 +76,9 @@ class IntercomCallImageEntity(ImageEntity):
         self._device_name = device_name
         self._photo_url = photo_url
         self._key_data = key_data
+        self._entry_id = entry_id
+        self._panel_scoped = panel_scoped
+        self._unique_id = unique_id
         self._image_bytes: Optional[bytes] = None
         self._unsub: Optional[Callable[[], None]] = None
 
@@ -75,7 +89,7 @@ class IntercomCallImageEntity(ImageEntity):
 
     @property
     def unique_id(self) -> str:
-        return f"{self._door_id}_photo"
+        return self._unique_id
 
     @property
     def device_info(self):
@@ -106,6 +120,12 @@ class IntercomCallImageEntity(ImageEntity):
 
     @callback
     def _handle_incoming_call(self, event) -> None:
+        if not event_belongs_to_entry(
+            event.data,
+            self._entry_id,
+            panel_scoped=self._panel_scoped,
+        ):
+            return
         if event.data.get("DoorId") != self._door_id:
             return
 
