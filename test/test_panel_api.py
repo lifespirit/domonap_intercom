@@ -27,6 +27,7 @@ def load_module(name: str, filename: str):
     return module
 
 
+load_module("custom_components.domonap.sip", "sip.py")
 load_module("custom_components.domonap.api", "api.py")
 panel_api = load_module("custom_components.domonap.panel_api", "panel_api.py")
 RubetekPanelIntercomAPI = panel_api.RubetekPanelIntercomAPI
@@ -93,6 +94,49 @@ class RubetekPanelApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(calls[0][2]["need_auth"])
         self.assertEqual(api.panel["userId"], "panel-user")
         self.assertEqual(api.refresh_token, "refresh-token")
+
+    async def test_panel_open_by_door_id_resolves_key_id(self):
+        api = RubetekPanelIntercomAPI(instance_id="0123456789abcdef")
+        opened = []
+
+        async def fake_get_paged_keys(*args, **kwargs):
+            return {
+                "results": [
+                    {"id": "key-other", "doorId": "door-other"},
+                    {"id": "key-target", "doorId": "door-target"},
+                ]
+            }
+
+        async def fake_open_by_key_id(key_id):
+            opened.append(key_id)
+            return {"ok": True, "body": ""}
+
+        api.get_paged_keys = fake_get_paged_keys
+        api.open_relay_by_key_id = fake_open_by_key_id
+
+        result = await api.open_relay_by_door_id("door-target")
+
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(opened, ["key-target"])
+
+    async def test_panel_open_by_unknown_door_does_not_call_relay(self):
+        api = RubetekPanelIntercomAPI(instance_id="0123456789abcdef")
+        opened = []
+
+        async def fake_get_paged_keys(*args, **kwargs):
+            return {"results": [{"id": "key-other", "doorId": "door-other"}]}
+
+        async def fake_open_by_key_id(key_id):
+            opened.append(key_id)
+            return {"ok": True}
+
+        api.get_paged_keys = fake_get_paged_keys
+        api.open_relay_by_key_id = fake_open_by_key_id
+
+        result = await api.open_relay_by_door_id("door-target")
+
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(opened, [])
 
     def test_existing_session_import_restores_exact_identity(self):
         session = {
