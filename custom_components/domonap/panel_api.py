@@ -80,8 +80,8 @@ class RubetekPanelIntercomAPI(IntercomAPI):
 
     Panel-only identity is isolated here. The legacy phone/SMS IntercomAPI keeps
     its existing mobile device-token lifecycle and SignalR implementation.
-    Shared REST endpoints, refresh-token handling and call lifecycle live in
-    IntercomAPI.
+    Shared REST endpoints and refresh-token handling remain in IntercomAPI;
+    Panel-specific SIP session destruction stays isolated here.
     """
 
     def __init__(
@@ -227,7 +227,7 @@ class RubetekPanelIntercomAPI(IntercomAPI):
         }
 
     def start_active_sip_call(self, push_data: dict[str, Any]) -> None:
-        """Start the panel SIP registration with the APK-compatible call flow."""
+        """Start the temporary panel SIP account for an incoming call."""
         raw_call_id = push_data.get("CallId") or push_data.get("callId")
         call_id = str(raw_call_id).strip() if raw_call_id is not None else ""
         if (
@@ -271,7 +271,18 @@ class RubetekPanelIntercomAPI(IntercomAPI):
 
         previous = self._active_sip_call
         if previous is not None:
-            asyncio.create_task(previous.stop())
+            destroy = getattr(previous, "destroy", None)
+            if callable(destroy):
+                asyncio.create_task(
+                    destroy(
+                        timeout=1.5,
+                        terminate_dialog=True,
+                        reason="replaced_by_new_call",
+                    )
+                )
+            else:
+                asyncio.create_task(previous.stop())
+
         self._active_sip_call = RubetekPanelSipCall(
             str(account), str(password), str(domain), port
         )
@@ -301,7 +312,7 @@ class RubetekPanelIntercomAPI(IntercomAPI):
         """Open a panel relay by resolving DoorId to the user's KeyId first.
 
         The Rubetek incoming-call UI answers the SIP call before requesting the
-        relay opening, then invokes endCallSmart() after a successful open.  That
+        relay opening, then invokes endCallSmart() after a successful open. That
         ordering matters for forked calls: rejecting our still-ringing branch
         does not stop the originating panel while accepting it does.
         """
@@ -358,57 +369,151 @@ class RubetekPanelIntercomAPI(IntercomAPI):
         _LOGGER.debug("Panel notifyCallEnded(%s) -> %s", call_id, result)
         return {"ok": True, "body": result}
 
+    async def _safe_notify_call_ended(self, call_id: str) -> Dict[str, Any]:
+        try:
+            return await self.end_call_notify(call_id)
+        except Exception as err:
+            _LOGGER.warning("Panel NotifyCallEnded failed for %s: %s", call_id, err)
+            return {"ok": False, "error": str(err)}
+
+    async def _destroy_panel_sip_call(
+        self,
+        sip_call: Any,
+        *,
+        reason: str,
+        terminate_dialog: bool = True,
+    ) -> Dict[str, Any]:
+        """Destroy one Panel SIP session, with compatibility for older test doubles."""
+        destroy = getattr(sip_call, "destroy", None)
+        if callable(destroy):
+            return await destroy(
+                timeout=2.0,
+                terminate_dialog=terminate_dialog,
+                reason=reason,
+            )
+
+        # Compatibility fallback for legacy/fake call objects. Runtime Panel
+        # sessions always use RubetekPanelSipCall.destroy().
+        sip_expected = bool(getattr(sip_call, "has_invite", False))
+        if terminate_dialog and sip_expected:
+            try:
+                terminate_result = await sip_call.end(timeout=2.0)
+            except Exception as err:
+                terminate_result = {"ok": False, "error": str(err)}
+        else:
+            terminate_result = {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_sip_invite",
+                "registered": getattr(sip_call, "registered", False),
+            }
+        try:
+            await sip_call.stop()
+        except Exception:
+            _LOGGER.debug("Legacy Panel SIP stop failed", exc_info=True)
+        return terminate_result
+
+    async def destroy_active_sip_session(
+        self,
+        call_id: Optional[str] = None,
+        *,
+        reason: str = "signalr_call_ended",
+        terminate_dialog: bool = True,
+    ) -> Dict[str, Any] | None:
+        """Destroy the temporary SIP account without sending REST call-end again."""
+        async with self._active_call_lock:
+            normalized = str(call_id).strip() if call_id is not None else ""
+            if normalized and self._active_call_id and normalized != self._active_call_id:
+                return None
+
+            sip_call = self._active_sip_call
+            self._active_sip_call = None
+            self._active_sip_call_id = None
+            if not normalized or self._active_call_id == normalized:
+                self._active_call_id = None
+
+            if sip_call is None:
+                return {"ok": True, "skipped": True, "reason": "no_sip_session"}
+
+            try:
+                return await self._destroy_panel_sip_call(
+                    sip_call,
+                    reason=reason,
+                    terminate_dialog=terminate_dialog,
+                )
+            except Exception as err:
+                _LOGGER.warning("Panel SIP session destruction failed: %s", err)
+                return {"ok": False, "error": str(err)}
+
     async def end_active_call(self) -> Dict[str, Any] | None:
-        """End a panel call using the same REST + SIP lifecycle as the APK."""
+        """End the Panel call using the APK order: REST in parallel with SIP destroy."""
         async with self._active_call_lock:
             call_id = self._active_call_id
             if not call_id:
                 return None
 
             sip_call = self._active_sip_call
-            try:
-                notify_result = await self.end_call_notify(call_id)
-            except Exception as err:
-                _LOGGER.warning(
-                    "Panel NotifyCallEnded failed for %s: %s", call_id, err
-                )
-                notify_result = {"ok": False, "error": str(err)}
+            sip_expected = sip_call is not None and bool(
+                getattr(sip_call, "has_invite", False)
+            )
 
-            sip_result: Any = None
-            sip_expected = sip_call is not None and sip_call.has_invite
+            # The APK launches notifyCallEnded in an IO coroutine and immediately
+            # continues with SIP hangup/destroy. Do the same: backend latency must
+            # never delay terminating the ringing/established SIP session.
+            notify_task = asyncio.create_task(
+                self._safe_notify_call_ended(call_id),
+                name="domonap_panel_notify_call_ended",
+            )
+
             if sip_call is not None:
-                if sip_call.has_invite:
-                    try:
-                        sip_result = await sip_call.end(timeout=2.0)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Panel SIP termination failed for %s: %s", call_id, err
-                        )
-                        sip_result = {"ok": False, "error": str(err)}
-                else:
-                    sip_result = {
-                        "ok": False,
-                        "skipped": True,
-                        "reason": "no_sip_invite",
-                        "registered": sip_call.registered,
-                    }
+                try:
+                    sip_result = await self._destroy_panel_sip_call(
+                        sip_call,
+                        reason="local_call_end",
+                        terminate_dialog=True,
+                    )
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Panel SIP session destruction failed for %s: %s",
+                        call_id,
+                        err,
+                    )
+                    sip_result = {"ok": False, "error": str(err)}
+            else:
+                sip_result = None
+
+            # notifyCallEnded was already running while the SIP teardown happened.
+            # Keep its result for diagnostics, but never use it to delay SIP start.
+            notify_result = await notify_task
 
             notify_ok = (
                 isinstance(notify_result, dict)
                 and notify_result.get("ok") is True
             )
             sip_ok = isinstance(sip_result, dict) and sip_result.get("ok") is True
-            # NotifyCallEnded by itself only updates the backend notification
-            # state; the live SIP dialog must end successfully when it exists.
-            ok = sip_ok if sip_expected else notify_ok
-            result = {
+            ok = sip_ok if sip_expected else (sip_ok or notify_ok)
+
+            self._active_sip_call = None
+            self._active_sip_call_id = None
+            self._active_call_id = None
+
+            return {
                 "ok": ok,
                 "notify": notify_result,
                 "sip": sip_result,
             }
-            if ok:
-                self.clear_active_call(call_id)
-            return result
+
+    async def close(self):
+        """Unload Panel runtime after unregistering its temporary SIP account."""
+        if self._active_sip_call is not None:
+            try:
+                await self.destroy_active_sip_session(
+                    reason="integration_unload",
+                    terminate_dialog=True,
+                )
+            except Exception:
+                _LOGGER.debug("Panel SIP cleanup on API close failed", exc_info=True)
+        await super().close()
 
     async def logout(self) -> Dict[str, Any]:
         """Explicitly invalidate a panel session.
