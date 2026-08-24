@@ -4,7 +4,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
-from .const import DOMAIN, API, EVENT_CALL_ENDED
+from .const import DOMAIN, API, CALL_CONTROLLER, EVENT_CALL_ENDED
 from .util import extract_phone_digits
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,14 +31,32 @@ async def _end_active_call(hass: HomeAssistant, api) -> None:
         _LOGGER.exception("Failed to end active call %s after opening the door", call_id)
 
 
+async def _finish_after_relay(hass: HomeAssistant, api, controller) -> None:
+    if controller is not None:
+        result = await controller.end_after_relay(source="home_assistant_button")
+        if isinstance(result, dict) and not result.get("ok", False):
+            _LOGGER.warning("Panel call teardown after button relay was incomplete: %s", result)
+        return
+    await _end_active_call(hass, api)
+
+
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities):
     entities: list[ButtonEntity] = []
 
-    api = hass.data[DOMAIN][config_entry.entry_id][API]
+    runtime = hass.data[DOMAIN][config_entry.entry_id]
+    api = runtime[API]
+    controller = runtime.get(CALL_CONTROLLER)
 
     # Button: open relay using door_id from the last incoming call
     phone_digits = extract_phone_digits(config_entry) or config_entry.entry_id
-    entities.append(IntercomOpenLastCallDoor(api, config_entry.entry_id, phone_digits))
+    entities.append(
+        IntercomOpenLastCallDoor(
+            api,
+            controller,
+            config_entry.entry_id,
+            phone_digits,
+        )
+    )
 
     # Existing per-door buttons
     response = await api.get_paged_keys()
@@ -47,7 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
         key_id = key["id"]
         door_id = key["doorId"]
         door_name = key["name"]
-        entities.append(IntercomDoor(api, key_id, door_id, door_name, key))
+        entities.append(IntercomDoor(api, controller, key_id, door_id, door_name, key))
 
     async_add_entities(entities, True)
 
@@ -57,8 +75,9 @@ class IntercomOpenLastCallDoor(ButtonEntity):
     _attr_icon = "mdi:phone-incoming"
     _attr_translation_key = "open_relay_by_last_call_door_id"
 
-    def __init__(self, api, entry_id: str, phone_digits: str):
+    def __init__(self, api, controller, entry_id: str, phone_digits: str):
         self._api = api
+        self._controller = controller
         self._entry_id = entry_id
         self._phone_digits = phone_digits
 
@@ -76,7 +95,6 @@ class IntercomOpenLastCallDoor(ButtonEntity):
             "model": "Domonap Account",
         }
 
-
     @property
     def suggested_object_id(self) -> str:
         # Ensures entity_id like button.<phone>_open_relay_by_last_call_door_id
@@ -92,12 +110,15 @@ class IntercomOpenLastCallDoor(ButtonEntity):
 
         door_id = state.state
         try:
-            res = await self._api.open_relay_by_door_id(door_id)
+            if self._controller is not None:
+                res = await self._controller.open_door_by_door_id(door_id)
+            else:
+                res = await self._api.open_relay_by_door_id(door_id)
             if not (isinstance(res, dict) and res.get("ok") is True):
                 _LOGGER.error("Failed to open relay by last call door_id=%s: %s", door_id, res)
                 return
 
-            await _end_active_call(self.hass, self._api)
+            await _finish_after_relay(self.hass, self._api, self._controller)
 
         except Exception:
             _LOGGER.exception("Error opening relay by last call door_id=%s", door_id)
@@ -108,8 +129,9 @@ class IntercomDoor(ButtonEntity):
     _attr_icon = "mdi:lock"
     _attr_translation_key = "open_door"
 
-    def __init__(self, api, key_id, door_id: str, name: str, key_data: dict):
+    def __init__(self, api, controller, key_id, door_id: str, name: str, key_data: dict):
         self._api = api
+        self._controller = controller
         self._key_id = key_id
         self._door_id = door_id
         self._name = name
@@ -136,10 +158,13 @@ class IntercomDoor(ButtonEntity):
 
     async def async_press(self):
         try:
-            response = await self._api.open_relay_by_key_id(self._key_id)
-            if response.get('ok') is not True:
-                _LOGGER.error(f"Failed to open the door {self._name}. Response: {response}")
+            if self._controller is not None:
+                response = await self._controller.open_door_by_key_id(self._key_id)
+            else:
+                response = await self._api.open_relay_by_key_id(self._key_id)
+            if response.get("ok") is not True:
+                _LOGGER.error("Failed to open the door %s. Response: %s", self._name, response)
                 return
-            await _end_active_call(self.hass, self._api)
+            await _finish_after_relay(self.hass, self._api, self._controller)
         except Exception as e:
-            _LOGGER.error(f"Error opening the door {self._name}: {e}")
+            _LOGGER.error("Error opening the door %s: %s", self._name, e)
