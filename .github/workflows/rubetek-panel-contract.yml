@@ -20,4 +20,4 @@ jobs:
       - name: Compile integration
         run: python -m compileall -q custom_components/domonap
       - name: Run panel API contract tests
-        run: python -m unittest test.test_panel_api -v
+        run: python test/test_panel_api.py -v
