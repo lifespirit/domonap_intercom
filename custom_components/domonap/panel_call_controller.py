@@ -45,7 +45,7 @@ class PanelCallController:
         self._active_call_id: str | None = None
         self._active_door_id: str | None = None
         self._forward_task: asyncio.Task | None = None
-        self._ending_from_external = False
+        self._ending_all_legs = False
 
     @property
     def enabled(self) -> bool:
@@ -136,11 +136,13 @@ class PanelCallController:
         self._active_door_id = None
 
     async def open_door_by_door_id(self, door_id: str) -> Any:
-        """Open a door while applying the configured call policy.
+        """Open a door using the APK-compatible call state transition.
 
-        Only an established external conversation owns the Domonap call
-        lifetime. While the forwarded destination is merely ringing, a regular
-        HA/Telegram relay action keeps the old behavior: answer/open/end.
+        If the Asterisk leg is already established, the Panel SIP leg is already
+        answered and we only open the relay here. The caller must then invoke
+        ``end_after_relay()`` so both SIP legs are terminated. If there is no
+        established external leg, the Panel API performs the APK-style silent
+        answer before opening the relay.
         """
         if self.external_call_established:
             return await self._open_panel_relay_only(door_id)
@@ -157,8 +159,12 @@ class PanelCallController:
         return await self._api.open_relay_by_key_id(key_id)
 
     def should_end_after_relay(self) -> bool:
-        """Return whether an HA relay action should also terminate the call."""
-        return not self.external_call_established
+        """Door opening always ends the call, matching the panel APK."""
+        return True
+
+    async def end_after_relay(self, *, source: str = "relay") -> dict[str, Any] | None:
+        """Terminate every active call leg after a successful relay opening."""
+        return await self._end_all_call_legs(source=source, end_external=True)
 
     async def _forward_to_external(
         self, panel_call: RubetekPanelSipCall, call_id: str
@@ -177,7 +183,9 @@ class PanelCallController:
             raise
         except Exception:
             _LOGGER.warning("Cannot start external SIP forwarding", exc_info=True)
-            await self._end_domonap_after_external_hangup()
+            await self._end_all_call_legs(
+                source="external_sip_forward_failure", end_external=False
+            )
 
     async def _on_external_dtmf(self, digit: str) -> None:
         if digit != "1":
@@ -192,38 +200,149 @@ class PanelCallController:
         except Exception:
             _LOGGER.exception("Failed to open Domonap relay on external SIP DTMF 1")
             return
-        if isinstance(result, dict) and result.get("ok") is True:
-            _LOGGER.info(
-                "Door %s opened by external SIP DTMF 1; call remains active",
-                door_id,
-            )
-        else:
+        if not (isinstance(result, dict) and result.get("ok") is True):
             _LOGGER.error("External SIP DTMF 1 relay opening failed: %s", result)
+            return
+
+        _LOGGER.info(
+            "Door %s opened by external SIP DTMF 1; ending all call legs",
+            door_id,
+        )
+        end_result = await self._end_all_call_legs(
+            source="external_sip_dtmf_1", end_external=True
+        )
+        if isinstance(end_result, dict) and not end_result.get("ok", False):
+            _LOGGER.warning("Call teardown after DTMF 1 was incomplete: %s", end_result)
 
     async def _on_external_hangup(self) -> None:
         _LOGGER.info("External SIP call ended; terminating the Domonap call")
-        await self._end_domonap_after_external_hangup()
+        await self._end_all_call_legs(
+            source="external_sip_peer_hangup", end_external=False
+        )
 
-    async def _end_domonap_after_external_hangup(self) -> None:
-        if self._ending_from_external:
-            return
-        self._ending_from_external = True
-        call_id = getattr(self._api, "active_call_id", None)
+    async def _end_all_call_legs(
+        self,
+        *,
+        source: str,
+        end_external: bool,
+    ) -> dict[str, Any] | None:
+        """End the Asterisk dialog and the temporary Domonap Panel session.
+
+        The two legs are independent SIP dialogs. Once the door is opened they
+        are terminated in parallel so neither leg unnecessarily keeps the call
+        alive. ``RubetekPanelIntercomAPI.end_active_call`` is responsible for
+        NotifyCallEnded + Panel SIP termination + REGISTER Expires: 0.
+        """
+        if self._ending_all_legs:
+            _LOGGER.debug("Call teardown already in progress (source=%s)", source)
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "teardown_in_progress",
+                "source": source,
+            }
+
+        call_id = getattr(self._api, "active_call_id", None) or self._active_call_id
+        external_call = self._account.active_call if self._account else None
+        if not call_id and (external_call is None or not end_external):
+            return None
+
+        self._ending_all_legs = True
         try:
+            external_task: asyncio.Task | None = None
+            domonap_task: asyncio.Task | None = None
+
+            if end_external and external_call is not None:
+                external_task = asyncio.create_task(
+                    external_call.hangup(local=True),
+                    name="domonap_end_external_sip_leg",
+                )
             if call_id:
-                result = await self._api.end_active_call()
-                if isinstance(result, dict) and result.get("ok") is True:
-                    _LOGGER.info(
-                        "Domonap call %s ended after external SIP hangup", call_id
-                    )
-                    self._hass.bus.fire(EVENT_CALL_ENDED, {"CallId": call_id})
-                else:
-                    _LOGGER.warning(
-                        "Domonap call termination after external SIP hangup failed: %s",
-                        result,
-                    )
+                domonap_task = asyncio.create_task(
+                    self._api.end_active_call(),
+                    name="domonap_end_panel_sip_leg",
+                )
+
+            external_result: Any = None
+            domonap_result: Any = None
+            external_error: BaseException | None = None
+            domonap_error: BaseException | None = None
+
+            tasks = [task for task in (external_task, domonap_task) if task is not None]
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                index = 0
+                if external_task is not None:
+                    value = results[index]
+                    index += 1
+                    if isinstance(value, BaseException):
+                        external_error = value
+                    else:
+                        external_result = value
+                if domonap_task is not None:
+                    value = results[index]
+                    if isinstance(value, BaseException):
+                        domonap_error = value
+                    else:
+                        domonap_result = value
+
+            external_ok = external_task is None or external_error is None
+            domonap_ok = domonap_task is None or (
+                domonap_error is None
+                and isinstance(domonap_result, dict)
+                and domonap_result.get("ok") is True
+            )
+
+            if external_error is not None:
+                _LOGGER.warning(
+                    "External SIP leg teardown failed after %s: %s",
+                    source,
+                    external_error,
+                )
+            elif external_task is not None:
+                _LOGGER.info("External SIP leg ended after %s", source)
+
+            if domonap_error is not None:
+                _LOGGER.warning(
+                    "Domonap SIP leg teardown failed after %s: %s",
+                    source,
+                    domonap_error,
+                )
+            elif domonap_task is not None and domonap_ok:
+                _LOGGER.info("Domonap call %s ended after %s", call_id, source)
+                self._hass.bus.fire(EVENT_CALL_ENDED, {"CallId": call_id})
+            elif domonap_task is not None:
+                _LOGGER.warning(
+                    "Domonap call teardown after %s was incomplete: %s",
+                    source,
+                    domonap_result,
+                )
+
+            ok = external_ok and domonap_ok
+            if domonap_ok:
+                self._active_call_id = None
+                self._active_door_id = None
+
+            return {
+                "ok": ok,
+                "source": source,
+                "external": (
+                    {"ok": False, "error": str(external_error)}
+                    if external_error is not None
+                    else {"ok": True, "result": external_result}
+                    if external_task is not None
+                    else {"ok": True, "skipped": True}
+                ),
+                "domonap": (
+                    {"ok": False, "error": str(domonap_error)}
+                    if domonap_error is not None
+                    else domonap_result
+                    if domonap_task is not None
+                    else {"ok": True, "skipped": True}
+                ),
+            }
         finally:
-            self._ending_from_external = False
+            self._ending_all_legs = False
 
     async def _open_panel_relay_only(self, door_id: str) -> Any:
         """Resolve DoorId -> KeyId without changing either SIP dialog."""
