@@ -80,7 +80,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .api import IntercomAPI, is_android_guid
     from .notify_consumer import IntercomNotifyConsumer
     from .panel_api import RubetekPanelIntercomAPI
-    from .panel_notify_consumer import RubetekPanelNotifyConsumer
+    from .panel_runtime_consumer import RubetekPanelRuntimeConsumer
 
     hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
@@ -101,7 +101,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }.items()
             if value is not None
         }
-        consumer_cls = RubetekPanelNotifyConsumer
     else:
         stored_device_token = entry.data.get(PARAM_DEVICE_TOKEN)
         api = IntercomAPI(
@@ -110,7 +109,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
             instance_id=entry.data.get(PARAM_INSTANCE_ID),
         )
-        consumer_cls = IntercomNotifyConsumer
 
     new_data = dict(entry.data)
     if not new_data.get(PARAM_WEBRTC_PROXY_SECRET):
@@ -184,12 +182,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryAuthFailed(REAUTH_NOTIFICATION_MESSAGE)
     _dismiss_reauth_notification(hass, entry)
 
-    consumer = consumer_cls(
-        hass,
-        api,
-        hass.data[DOMAIN].get(MEDIA_PROXY),
-        new_data.get(PARAM_WEBRTC_PROXY_SECRET),
-    )
+    if auth_mode == AUTH_MODE_PANEL:
+        consumer = RubetekPanelRuntimeConsumer(
+            hass,
+            api,
+            hass.data[DOMAIN].get(MEDIA_PROXY),
+            new_data.get(PARAM_WEBRTC_PROXY_SECRET),
+            config_entry_id=entry.entry_id,
+        )
+    else:
+        consumer = IntercomNotifyConsumer(
+            hass,
+            api,
+            hass.data[DOMAIN].get(MEDIA_PROXY),
+            new_data.get(PARAM_WEBRTC_PROXY_SECRET),
+        )
+
     hass.data[DOMAIN][entry.entry_id][API] = api
     hass.data[DOMAIN][entry.entry_id]["notify_consumer"] = consumer
 
@@ -221,6 +229,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
 
+    # If this was the last entry, remove services.
     remaining_entries = [
         key for key in hass.data.get(DOMAIN, {}) if key != WEBRTC_PROXY
     ]
