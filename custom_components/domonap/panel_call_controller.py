@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .const import EVENT_CALL_ENDED
-from .external_sip import AsteriskSipAccount, ExternalSipConfig, parse_host_port
+from .external_sip_signaling import AsteriskSipAccount, ExternalSipConfig, parse_host_port
 from .panel_sip import RubetekPanelSipCall
 
 _LOGGER = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ class PanelCallController:
         try:
             await account.dial(panel_call, call_id=call_id)
             _LOGGER.info(
-                "Forwarding Domonap call %s to external SIP number %s",
+                "Forwarding Domonap call %s to external SIP number %s (signaling only)",
                 call_id,
                 self._call_number,
             )
