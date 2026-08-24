@@ -78,7 +78,8 @@ class RubetekPanelIntercomAPI(IntercomAPI):
 
     Panel-only identity is isolated here. The legacy phone/SMS IntercomAPI keeps
     its existing mobile device-token lifecycle and SignalR implementation.
-    Shared REST endpoints and refresh-token handling remain in IntercomAPI.
+    Shared REST endpoints, refresh-token handling and call lifecycle live in
+    IntercomAPI.
     """
 
     def __init__(
@@ -221,6 +222,49 @@ class RubetekPanelIntercomAPI(IntercomAPI):
                 "refreshToken": self.refresh_token,
                 "refreshExpirationDate": self.refresh_expiration_date,
             },
+        }
+
+    async def open_relay_by_door_id(self, door_id: str):
+        """Open a panel relay by resolving DoorId to the user's KeyId first.
+
+        The activated panel session was observed successfully opening relays via
+        /client-api/Device/OpenRelayByKeyId. Keep this workaround isolated to
+        the panel profile so the legacy phone/SMS API contract is unchanged.
+        """
+        keys_response = await self.get_paged_keys()
+        if not isinstance(keys_response, dict):
+            return {
+                "ok": False,
+                "error": "Unexpected key list response",
+                "body": str(keys_response),
+            }
+        if "error" in keys_response:
+            return keys_response
+
+        wanted_door_id = str(door_id)
+        for key in keys_response.get("results", []):
+            if not isinstance(key, dict):
+                continue
+            if str(key.get("doorId", "")) != wanted_door_id:
+                continue
+            key_id = key.get("id")
+            if not key_id:
+                return {
+                    "ok": False,
+                    "error": "Door key has no id",
+                    "door_id": wanted_door_id,
+                }
+            _LOGGER.debug(
+                "Panel relay DoorId=%s resolved to KeyId=%s",
+                wanted_door_id,
+                key_id,
+            )
+            return await self.open_relay_by_key_id(str(key_id))
+
+        return {
+            "ok": False,
+            "error": "No panel key found for DoorId",
+            "door_id": wanted_door_id,
         }
 
     async def logout(self) -> Dict[str, Any]:
