@@ -138,17 +138,17 @@ async def _open_by_key_id(hass: HomeAssistant, entry_id: str, key_id: str) -> An
 
 
 async def _finish_relay_action(hass: HomeAssistant, entry_id: str, api: Any) -> Any:
+    """Finish a successful relay action using the runtime's call policy.
+
+    Rubetek Panel follows the APK behavior: opening the door ends the call. When
+    an Asterisk leg exists, the controller terminates that dialog and the
+    temporary Domonap Panel SIP session together. Legacy phone/SMS entries keep
+    using their existing API call termination path.
+    """
     runtime = _entry_runtime(hass, entry_id)
     controller = runtime.get(CALL_CONTROLLER)
-    if controller is not None and not controller.should_end_after_relay():
-        _LOGGER.info(
-            "Door opened while external SIP call is active; keeping Domonap call alive"
-        )
-        return {
-            "ok": True,
-            "skipped": True,
-            "reason": "external_sip_call_active",
-        }
+    if controller is not None:
+        return await controller.end_after_relay(source="home_assistant_relay")
     return await _end_active_call(hass, api)
 
 
