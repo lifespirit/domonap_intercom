@@ -10,8 +10,12 @@ from .const import (
     CONF_PHONE_NUMBER,
     CONF_CONFIRM_CODE,
     CONF_AUTH_MODE,
+    CONF_PANEL_SETUP_MODE,
+    CONF_PANEL_SESSION,
     AUTH_MODE_PHONE,
     AUTH_MODE_PANEL,
+    PANEL_SETUP_CODE,
+    PANEL_SETUP_SESSION,
     PARAM_REFRESH_EXPIRATION,
     PARAM_REFRESH_TOKEN,
     PARAM_ACCESS_TOKEN,
@@ -21,13 +25,15 @@ from .const import (
     PARAM_AUTH_MODE,
     PARAM_PANEL_USER_ID,
     PARAM_PANEL_NAME,
+    PARAM_PANEL_DEVICE_INFO,
 )
 from .api import IntercomAPI, is_android_guid
 from .panel_api import RubetekPanelIntercomAPI
 
 
 class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
-    # Keep schema version 1: old entries remain valid and default to phone mode.
+    # Keep schema version 1: entries created by main remain valid and default to
+    # the original phone/SMS profile when auth_mode is absent.
     VERSION = 1
 
     def __init__(self):
@@ -45,10 +51,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self._auth_mode = entry_data.get(PARAM_AUTH_MODE, AUTH_MODE_PHONE)
 
         if self._auth_mode == AUTH_MODE_PANEL:
-            self._api = RubetekPanelIntercomAPI(
-                instance_id=entry_data.get(PARAM_INSTANCE_ID),
-            )
-            return await self.async_step_panel()
+            return await self.async_step_panel_setup()
 
         # Legacy phone/SMS reauth path stays behavior-compatible with main.
         self._country_code = entry_data.get(CONF_COUNTRY_CODE)
@@ -81,12 +84,11 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_user(self, user_input=None):
-        """Choose authentication profile for a new integration entry."""
+        """Choose the authorization profile for a new integration entry."""
         if user_input is not None:
             self._auth_mode = user_input[CONF_AUTH_MODE]
             if self._auth_mode == AUTH_MODE_PANEL:
-                self._api = RubetekPanelIntercomAPI()
-                return await self.async_step_panel()
+                return await self.async_step_panel_setup()
             self._api = IntercomAPI()
             return await self.async_step_phone()
 
@@ -124,7 +126,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_confirm(self, user_input=None):
-        """Original SMS confirmation path, kept isolated from panel auth."""
+        """Original SMS confirmation path, isolated from panel auth."""
         errors = {}
         if user_input is not None:
             self._confirm_code = user_input[CONF_CONFIRM_CODE]
@@ -162,8 +164,41 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_panel_setup(self, user_input=None):
+        """Choose fresh code activation or restore an already activated panel."""
+        if user_input is not None:
+            setup_mode = user_input[CONF_PANEL_SETUP_MODE]
+            if setup_mode == PANEL_SETUP_SESSION:
+                return await self.async_step_panel_session()
+            instance_id = (
+                self._reauth_entry.data.get(PARAM_INSTANCE_ID)
+                if self._reauth_entry is not None
+                else None
+            )
+            device_info = (
+                self._reauth_entry.data.get(PARAM_PANEL_DEVICE_INFO)
+                if self._reauth_entry is not None
+                else None
+            )
+            self._api = RubetekPanelIntercomAPI(
+                instance_id=instance_id,
+                device_info=device_info,
+            )
+            return await self.async_step_panel()
+
+        return self.async_show_form(
+            step_id="panel_setup",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_PANEL_SETUP_MODE, default=PANEL_SETUP_CODE
+                    ): vol.In([PANEL_SETUP_CODE, PANEL_SETUP_SESSION])
+                }
+            ),
+        )
+
     async def async_step_panel(self, user_input=None):
-        """Rubetek panel provisioning code flow."""
+        """Rubetek panel provisioning-code flow."""
         errors = {}
         if user_input is not None:
             confirm_code = self._sanitize_number(user_input[CONF_CONFIRM_CODE])
@@ -171,13 +206,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_panel_code"
             else:
                 if not isinstance(self._api, RubetekPanelIntercomAPI):
-                    self._api = RubetekPanelIntercomAPI(
-                        instance_id=(
-                            self._reauth_entry.data.get(PARAM_INSTANCE_ID)
-                            if self._reauth_entry is not None
-                            else None
-                        )
-                    )
+                    self._api = RubetekPanelIntercomAPI()
                 response = await self._api.confirm_panel_authorization(confirm_code)
                 if (
                     not self._api.access_token
@@ -189,25 +218,47 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 ):
                     errors["base"] = "panel_confirmation_failed"
                 else:
-                    data = self._entry_data_panel()
-                    panel_name = self._api.panel.get("name") or "Rubetek Panel"
-                    if self._reauth_entry is not None:
-                        self.hass.config_entries.async_update_entry(
-                            self._reauth_entry,
-                            title=panel_name,
-                            data=data,
-                        )
-                        await self.hass.config_entries.async_reload(
-                            self._reauth_entry.entry_id
-                        )
-                        return self.async_abort(reason="reauth_successful")
-                    return self.async_create_entry(title=panel_name, data=data)
+                    return await self._finish_panel_flow()
 
         return self.async_show_form(
             step_id="panel",
             data_schema=vol.Schema({vol.Required(CONF_CONFIRM_CODE): str}),
             errors=errors,
         )
+
+    async def async_step_panel_session(self, user_input=None):
+        """Restore a Panel principal from a previously captured session JSON."""
+        errors = {}
+        if user_input is not None:
+            try:
+                self._api = RubetekPanelIntercomAPI.from_session_payload(
+                    user_input[CONF_PANEL_SESSION]
+                )
+            except (TypeError, ValueError, KeyError):
+                errors["base"] = "invalid_panel_session"
+            else:
+                return await self._finish_panel_flow()
+
+        return self.async_show_form(
+            step_id="panel_session",
+            data_schema=vol.Schema({vol.Required(CONF_PANEL_SESSION): str}),
+            errors=errors,
+        )
+
+    async def _finish_panel_flow(self):
+        data = self._entry_data_panel()
+        panel_name = self._api.panel.get("name") or "Rubetek Panel"
+        if self._reauth_entry is not None:
+            self.hass.config_entries.async_update_entry(
+                self._reauth_entry,
+                title=panel_name,
+                data=data,
+            )
+            await self.hass.config_entries.async_reload(
+                self._reauth_entry.entry_id
+            )
+            return self.async_abort(reason="reauth_successful")
+        return self.async_create_entry(title=panel_name, data=data)
 
     def _sanitize_number(self, input_string):
         return re.sub(r'\D', '', input_string)
@@ -232,6 +283,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
         data.pop(PARAM_PANEL_USER_ID, None)
         data.pop(PARAM_PANEL_NAME, None)
+        data.pop(PARAM_PANEL_DEVICE_INFO, None)
         return data
 
     def _entry_data_panel(self) -> dict[str, Optional[str]]:
@@ -244,6 +296,7 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 PARAM_REFRESH_TOKEN: self._api.refresh_token,
                 PARAM_REFRESH_EXPIRATION: self._api.refresh_expiration_date,
                 PARAM_INSTANCE_ID: self._api.instance_id,
+                PARAM_PANEL_DEVICE_INFO: self._api.device_info,
                 PARAM_PANEL_USER_ID: self._api.panel.get("userId"),
                 PARAM_PANEL_NAME: self._api.panel.get("name"),
             }
