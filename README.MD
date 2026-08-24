@@ -2,25 +2,95 @@
 
 ![Logo](https://github.com/svmironov/domonap_intercom/blob/main/img/icon.png?raw=true)
 
-Интеграция позволяет управлять устройствами, привязанными к приложению **Domonap** (альтернативный провайдер домофона в домах ПИК) из **Home Assistant**.
+Интеграция позволяет управлять устройствами, привязанными к приложению **Domonap**, из **Home Assistant**.
 
 ## Возможности
 
-* Открытие дверей  
-* Загрузка видеопотока  
-* Локальный WebRTC/WHEP proxy для `go2rtc` без авторизации Domonap  
-* Уведомления о звонках в виде бинарного сенсора
-* События в фоновом процессе для использования в автоматизациях  
+- Открытие дверей.
+- Загрузка видеопотока.
+- Локальный WebRTC/WHEP proxy для `go2rtc` без передачи авторизации Domonap в `go2rtc`.
+- Уведомления о звонках в виде бинарного сенсора.
+- События входящих звонков и сообщений для автоматизаций.
+- Исходная авторизация **номер телефона + SMS**.
+- Отдельный профиль **Rubetek Panel** с 8-значным кодом активации или импортом существующей panel-сессии.
+- Одновременная работа двух и более Rubetek Panel записей.
+- Опциональная интеграция Rubetek Panel с внешним SIP/Asterisk.
+
+## Документация
+
+- [Авторизация Rubetek Panel](docs/rubetek-panel.md) — откуда взять 8-значный код, активация и импорт существующей panel-сессии.
+- [SIP / Asterisk](docs/sip.md) — схема сигнализации, RTP, DTMF, NAT и завершение вызова.
+- [Несколько Rubetek Panel аккаунтов](docs/multi-account.md) — `config_entry_id`, разделение дверей и отдельные SIP accounts.
+- [Пример automation.yaml](docs/automation-example.md) — описание всех значений для обезличенного примера.
+- [`examples/automation.yaml`](examples/automation.yaml) — готовый обезличенный multi-account Telegram пример без реальных ID и токенов.
+
+## Авторизация
+
+При добавлении новой записи интеграции можно выбрать один из двух профилей.
+
+### Номер телефона + SMS
+
+Это исходный режим интеграции. Существующие записи, созданные до появления Rubetek Panel, продолжают использовать его без миграции на новый профиль.
+
+### Rubetek Panel
+
+Rubetek/AOSP Panel использует отдельный panel principal и не требует авторизации Home Assistant по номеру телефона.
+
+Для новой панели требуется **8-значный код активации**. Его нужно запросить через поддержку в официальном приложении Domonap, указав, что требуется код активации стационарной/Rubetek-панели для вашего объекта. Код используется только один раз для обмена на panel-сессию и не сохраняется в Home Assistant.
+
+Если panel-сессия уже была активирована и сохранена, её можно импортировать как JSON без повторного использования кода.
+
+Подробная инструкция: [docs/rubetek-panel.md](docs/rubetek-panel.md).
+
+## Несколько аккаунтов
+
+Каждая Rubetek Panel запись имеет собственные токены, SignalR consumer, состояние вызова и SIP runtime. Entity `unique_id` для Panel записей изолированы по `config_entry_id`, поэтому разные аккаунты могут одновременно существовать в одном Home Assistant.
+
+Для service calls при двух и более аккаунтах рекомендуется всегда передавать `config_entry_id`:
+
+```yaml
+action: domonap.open_relay_by_door_id
+data:
+  door_id: "REPLACE_WITH_DOOR_ID"
+  config_entry_id: "REPLACE_WITH_CONFIG_ENTRY_ID"
+```
+
+Panel-событие `domonap_incoming_call` также содержит `config_entry_id`. Его следует передавать вместе с `DoorId` до callback/service call, а не пытаться угадывать аккаунт только по двери.
+
+Подробнее: [docs/multi-account.md](docs/multi-account.md).
+
+## SIP / Asterisk
+
+Для Rubetek Panel можно включить внешний SIP в options записи интеграции. Home Assistant регистрируется на настроенном SIP server и при входящем Domonap вызове звонит на указанный extension.
+
+Home Assistant мостит **только SIP-сигнализацию**:
+
+```text
+                 SIP                     SIP
+Domonap  <----------------> Home Assistant <----------------> Asterisk
+   │                                                     │
+   └──────────────────── RTP напрямую ──────────────────┘
+```
+
+Исходный SDP Domonap передаётся Asterisk без изменения, а SDP answer Asterisk передаётся обратно Domonap без изменения. NAT, RTP, codec negotiation и transcoding должны быть настроены на Asterisk.
+
+Сейчас поддерживается UDP на внешнем SIP leg. Для DTMF `1` leg Asterisk → Home Assistant должен использовать SIP INFO (`dtmf_mode=info`). Успешное открытие двери через DTMF, Home Assistant или Telegram завершает текущий вызов на обоих SIP legs, повторяя поведение Rubetek Panel APK.
+
+> SIP-функциональность пока экспериментальная: на отдельных вызовах завершение временной Domonap SIP-сессии может вести себя нестабильно. Для диагностики используйте SIP logger Asterisk и DEBUG-логи интеграции.
+
+Подробнее: [docs/sip.md](docs/sip.md).
 
 ## WebRTC proxy для go2rtc
 
 Интеграция поднимает локальный WHEP proxy в Home Assistant. Он сам обновляет токен и проксирует WebRTC-сессию в Domonap, поэтому `go2rtc` может подключаться к HA URL без авторизации в Domonap.
 
 У WebRTC-камеры появляются атрибуты:
-* `go2rtc_webrtc_path` - относительный путь proxy внутри Home Assistant
-* `go2rtc_webrtc_url` - полный URL для подключения, если в HA настроен внутренний или внешний URL
+
+- `go2rtc_webrtc_path` — относительный путь proxy внутри Home Assistant;
+- `go2rtc_webrtc_url` — полный URL для подключения, если в HA настроен внутренний или внешний URL.
 
 Пример `go2rtc`:
+
 ```yaml
 streams:
   domonap_entrance:
@@ -29,110 +99,103 @@ streams:
 
 Практически удобнее брать готовое значение из атрибута `go2rtc_webrtc_url` у сущности камеры и вставлять его в конфиг `go2rtc`.
 
-## Автоматизации
+## События и автоматизации
 
-### Интеграция генерирует события, которые можно использовать в автоматизациях Home Assistant:
-1. При входящем звонке```domonap_incoming_call``` следующего содержания:
+### `domonap_incoming_call`
+
+При входящем звонке интеграция генерирует событие примерно следующего вида:
+
 ```yaml
 event_type: domonap_incoming_call
 data:
   EventMessage: DomofonCalling
-  DoorId: 8452d508564e5a076c8122b6
-  Address: Лифтовой холл
-  CallId: "154543486.54786447"
-  VideoUrl: https://hls.domonap.ru/8452d508564e5a076c8122b6/index.m3u8
-  HttpVideoUrl: https://hls.domonap.ru/8452d508564e5a076c8122b6/index.m3u8
-  VideoPreview: >-
-    https://api.domonap.ru/video-api/preview/Device/8452d508564e5a076c8122b6/qQtfsMiQYS0YuD8LLKrDGbPijncAShubrISKMs7E1cw
-  SipAccount: *
-  SipPassword: *
-  SipDomain: *
-  SipPort: *
+  DoorId: "REDACTED_DOOR_ID"
+  Address: "Домофон"
+  CallId: "REDACTED_CALL_ID"
+  VideoUrl: "https://hls.domonap.ru/..."
+  HttpVideoUrl: "https://hls.domonap.ru/..."
+  VideoPreview: "https://api.domonap.ru/..."
+  SipAccount: "REDACTED"
+  SipPassword: "REDACTED"
+  SipDomain: "REDACTED"
+  SipPort: "REDACTED"
   PushType: Domofon
-  PhotoUrl: >-
-    https://home-assistant.local/api/domonap/media_proxy/...
-  photoUrl: >-
-    https://home-assistant.local/api/domonap/media_proxy/...
-  OriginalPhotoUrl: >-
-    https://s3-api.domonap.ru/...
+  config_entry_id: "REDACTED_CONFIG_ENTRY_ID"
+  PhotoUrl: "https://home-assistant.local/api/domonap/media_proxy/..."
+  photoUrl: "https://home-assistant.local/api/domonap/media_proxy/..."
+  OriginalPhotoUrl: "https://s3-api.domonap.ru/..."
 origin: LOCAL
-time_fired: "2025-06-18T15:10:58.919425+00:00"
-```
-* `DoorId` - идентификатор двери
-* `Address` - адрес вызывающего устройства 
-* `PhotoUrl` / `photoUrl` - URL фотографии звонящего через локальный proxy Home Assistant. Интеграция получает исходный `photoUrl` так же, как приложение Domonap: из истории звонков `client-api/CallLog/GetCallLogs`. Если запись звонка или фото ещё недоступны, используется авторизованный `VideoPreview`
-* `OriginalPhotoUrl` - оригинальный `photoUrl` из истории звонков Domonap для диагностики
-* `PushPhotoUrl` - исходный `photoUrl` из push-события, если Domonap его прислал; хранится только для диагностики
-* `VideoPreview` - URL превью через локальный proxy Home Assistant с авторизацией в Domonap
-
-2. При входящем сообщении```domonap_receive_message``` следующего содержания:
-```yaml
-event_type: domonap_receive_message
-data:
-  id: 8452d508564e5a076c8122b6
-  channel: username1-username
-  text: "Текст сообщения"
-  data: null
-  sender: username1
-  name: Username
-  chatType: Private
-  createdOn: "2025-06-18T15:02:32.1264693Z"
-  isRead: false
-  avatar: https://s3-api.domonap.ru/avatar/avatar
-origin: LOCAL
-time_fired: "2025-06-18T15:02:32.208782+00:00"
 ```
 
-3. При изменении статуса пользователя (жителя дома)```domonap_user_status_changed``` следующего содержания:
-```yaml
-event_type: domonap_user_status_changed
-data:
-  user: username1
-  status: offline
-origin: LOCAL
-time_fired: "2025-06-18T15:07:23.395167+00:00"
-```
+Основные поля:
 
-### Пример автоматизаций:
-Push уведомление мобильного приложения Home Assistant:
+- `DoorId` — идентификатор двери.
+- `Address` — адрес/название вызывающего устройства.
+- `config_entry_id` — для Rubetek Panel показывает, какая именно запись интеграции получила вызов; критически важно при multi-account.
+- `PhotoUrl` / `photoUrl` — URL фотографии звонящего через локальный proxy Home Assistant.
+- `OriginalPhotoUrl` — оригинальный `photoUrl` из истории звонков Domonap для диагностики.
+- `PushPhotoUrl` — исходный `photoUrl` из push-события, если Domonap его прислал.
+- `VideoPreview` — авторизованное превью вызова.
+
+### Другие события
+
+Интеграция также поддерживает события сообщений и изменения статуса пользователей, включая:
+
+- `domonap_receive_message`;
+- `domonap_user_status_changed`.
+
+### Примеры
+
+Минимальное уведомление в мобильное приложение Home Assistant:
+
 ```yaml
 automation:
   - alias: "Уведомление о звонке"
-    trigger:
-      platform: event
-      event_type: domonap_incoming_call
-    action:
-      - service: notify.mobile_app
+    triggers:
+      - trigger: event
+        event_type: domonap_incoming_call
+    actions:
+      - action: notify.mobile_app
         data:
           message: "Входящий звонок на домофон"
           data:
             image: "{{ trigger.event.data.PhotoUrl }}"
 ```
-Уведомления о звонке сообщением с фото в Telegram (настройка [Telegram](https://www.home-assistant.io/integrations/telegram_polling)):
-```yaml
-automation:
-  - alias: "Звонок из домофона в Telegram"
-    triggers:
-      - trigger: event
-        event_type: domonap_incoming_call
-    actions:
-      - action: telegram_bot.send_photo
-        data:
-          caption: |-
-            📞📲 Кто-то звонит в домофон
-            📌 {{ trigger.event.data.Address }} 
-          url: "{{ trigger.event.data.PhotoUrl }}"
-          inline_keyboard:
-            - "🔓 Открыть:/open_{{ trigger.event.data.DoorId }}"
-```
+
+Для Telegram, нескольких Rubetek аккаунтов, ручного меню дверей и Telegram topics используйте обезличенный пример [`examples/automation.yaml`](examples/automation.yaml). Откуда брать `DoorId`, `config_entry_id`, chat/thread ID и Telegram event entity описано в [docs/automation-example.md](docs/automation-example.md).
+
 ## Ограничения
-Существует ограничение на одновременное использование одного номера телефона в приложении Domonap и интеграции HA. На мобильное устройство с официальным приложением Domonap перестанут приходить push уведомления о входящем звонке в режиме когда приложение не находится на открытом экране.
+
+### Phone/SMS profile
+
+Существует ограничение на одновременное использование одного номера телефона в официальном приложении Domonap и интеграции HA: на мобильное устройство могут перестать приходить фоновые push-уведомления о входящем звонке.
+
+Rubetek Panel использует отдельный профиль и отдельный SignalR runtime, поэтому это ограничение не является его моделью работы.
+
+### SIP
+
+Внешний SIP доступен только для Rubetek Panel и в текущей реализации поддерживает UDP. Завершение некоторых временных Domonap SIP-сессий всё ещё находится в стадии доработки.
 
 ## Установка
-* Установка осветляется через HACS, предварительно необходимо добавить репозиторий https://github.com/svmironov/domonap_intercom
-* После установки перезапустите сервер Home Assistant  
-* Добавьте интеграцию в разделе **Настройки → Устройства и службы**  
-* Авторизация выполняется по номеру телефона, привязанному к приложению при регистрации  
+
+- Установите интеграцию через HACS или скопируйте `custom_components/domonap` вручную.
+- Перезапустите Home Assistant.
+- Добавьте интеграцию в **Настройки → Устройства и службы**.
+- Выберите профиль авторизации:
+  - **Номер телефона + SMS** для исходного мобильного режима;
+  - **Rubetek Panel** для активации 8-значным кодом или импорта существующей panel-сессии.
+
+## Безопасность
+
+Не публикуйте:
+
+- `accessToken` / `refreshToken`;
+- JSON panel-сессии;
+- `SipPassword` из входящего Domonap вызова;
+- пароль SIP account Asterisk;
+- содержимое `.storage/core.config_entries` целиком.
+
+При публикации automation/log обязательно обезличивайте `DoorId`, `KeyId`, `config_entry_id`, Telegram chat/thread IDs и адреса объектов.
 
 ## Поддержка проекта
 
