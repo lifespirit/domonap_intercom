@@ -1,0 +1,298 @@
+# Example: Domonap Rubetek Panel + Telegram + multiple accounts
+#
+# This file contains NO real account, door, chat, token or entity IDs.
+# Replace the placeholder entity_id below and define the referenced !secret
+# values in secrets.yaml before using the example.
+#
+# Required secrets.yaml values:
+#   domonap_telegram_chat_id: <Telegram chat id>
+#   domonap_telegram_thread_id: <Telegram topic/thread id>
+#   domonap_entry_a: <Home Assistant config_entry_id for Panel A>
+#   domonap_entry_b: <Home Assistant config_entry_id for Panel B>
+#   domonap_door_a: <Domonap DoorId opened through Panel A>
+#   domonap_door_b: <Domonap DoorId opened through Panel B>
+#
+# If your Telegram chat does not use topics, remove message_thread_id from the
+# Domonap incoming-call automation. The router itself detects the thread from
+# the incoming Telegram update and replies in the same topic.
+
+- alias: "Domonap Telegram Router"
+  id: domonap_telegram_router_example
+  mode: parallel
+  max: 20
+
+  triggers:
+    - trigger: state
+      # Replace with the event entity created by your Telegram bot integration.
+      entity_id: event.REPLACE_WITH_TELEGRAM_BOT_UPDATE_EVENT
+
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.to_state.attributes.get('event_type', '')
+           in ['telegram_command', 'telegram_callback'] }}
+
+  variables:
+    event_type: >-
+      {{ trigger.to_state.attributes.get('event_type', '') }}
+
+    command: >-
+      {{ trigger.to_state.attributes.get('command', '').split('@', 1)[0] }}
+
+    chat_id: >-
+      {{ trigger.to_state.attributes.get('chat_id', 0) | int }}
+
+    # Topic from which the Telegram request/callback was received.
+    message_thread_id: >-
+      {% set direct = trigger.to_state.attributes.get('message_thread_id') %}
+      {% set msg = trigger.to_state.attributes.get('message') %}
+      {% if direct is not none %}
+        {{ direct | int }}
+      {% elif msg is mapping and msg.get('message_thread_id') is not none %}
+        {{ msg.get('message_thread_id') | int }}
+      {% else %}
+        {{ 0 }}
+      {% endif %}
+
+    callback_id: >-
+      {{ trigger.to_state.attributes.get('id', '') }}
+
+    message_id: >-
+      {% set msg = trigger.to_state.attributes.get('message') %}
+      {% if msg is mapping %}
+        {{ msg.get('message_id', '') }}
+      {% else %}
+        {{ '' }}
+      {% endif %}
+
+    # Static manual-door menu. Each DoorId is explicitly tied to the account
+    # that owns the corresponding key/access.
+    doors:
+      door_a:
+        name: "Дверь A"
+        door_id: !secret domonap_door_a
+        entry_id: !secret domonap_entry_a
+
+      door_b:
+        name: "Дверь B"
+        door_id: !secret domonap_door_b
+        entry_id: !secret domonap_entry_b
+
+  actions:
+    - choose:
+        # Main menu.
+        - conditions:
+            - condition: template
+              value_template: >-
+                {{ event_type == 'telegram_command'
+                   and command in ['/domonap', '/doors'] }}
+          sequence:
+            - if:
+                - condition: template
+                  value_template: "{{ message_thread_id | int(0) > 0 }}"
+              then:
+                - action: telegram_bot.send_message
+                  data:
+                    chat_id: "{{ chat_id }}"
+                    message_thread_id: "{{ message_thread_id | int }}"
+                    parse_mode: html
+                    message: |-
+                      🚪 <b>Domonap</b>
+
+                      Выберите действие:
+                    inline_keyboard:
+                      - "🚪 Двери:/dn:doors"
+              else:
+                - action: telegram_bot.send_message
+                  data:
+                    chat_id: "{{ chat_id }}"
+                    parse_mode: html
+                    message: |-
+                      🚪 <b>Domonap</b>
+
+                      Выберите действие:
+                    inline_keyboard:
+                      - "🚪 Двери:/dn:doors"
+
+        # Manual door menu.
+        - conditions:
+            - condition: template
+              value_template: >-
+                {{ event_type == 'telegram_callback'
+                   and command == '/dn:doors' }}
+          sequence:
+            - action: telegram_bot.answer_callback_query
+              data:
+                callback_query_id: "{{ callback_id }}"
+                message: "Двери"
+                show_alert: false
+
+            - action: telegram_bot.edit_message
+              data:
+                chat_id: "{{ chat_id }}"
+                message_id: "{{ message_id }}"
+                parse_mode: html
+                message: |-
+                  🚪 <b>Двери</b>
+
+                  Выберите дверь:
+                inline_keyboard:
+                  - "🚪 Дверь A:/dn:m:door_a"
+                  - "🚪 Дверь B:/dn:m:door_b"
+
+        # Manual open: account is selected from the static map above.
+        - conditions:
+            - condition: template
+              value_template: >-
+                {{ event_type == 'telegram_callback'
+                   and command.startswith('/dn:m:') }}
+          sequence:
+            - variables:
+                door_key: "{{ command.split(':')[-1] }}"
+                manual_door_id: >-
+                  {{ doors.get(door_key, {}).get('door_id', '') }}
+                manual_entry_id: >-
+                  {{ doors.get(door_key, {}).get('entry_id', '') }}
+
+            - condition: template
+              value_template: >-
+                {{ manual_door_id | length > 0
+                   and manual_entry_id | length > 0 }}
+
+            - action: telegram_bot.answer_callback_query
+              data:
+                callback_query_id: "{{ callback_id }}"
+                message: "Открываю…"
+                show_alert: false
+
+            - action: domonap.open_relay_by_door_id
+              data:
+                door_id: "{{ manual_door_id }}"
+                config_entry_id: "{{ manual_entry_id }}"
+
+        # Open the exact door/account that generated an incoming call.
+        # Short callback format is used because Telegram callback_data is limited
+        # to 64 bytes: /dn:o:<config_entry_id>:<DoorId>
+        - conditions:
+            - condition: template
+              value_template: >-
+                {{ event_type == 'telegram_callback'
+                   and command.startswith('/dn:o:') }}
+          sequence:
+            - variables:
+                callback_parts: "{{ command.split(':') }}"
+                incoming_entry_id: >-
+                  {{ callback_parts[2]
+                     if callback_parts | length == 4
+                     else '' }}
+                incoming_door_id: >-
+                  {{ callback_parts[3]
+                     if callback_parts | length == 4
+                     else '' }}
+
+            - condition: template
+              value_template: >-
+                {{ incoming_entry_id | length > 0
+                   and incoming_door_id | length > 0 }}
+
+            - action: telegram_bot.answer_callback_query
+              data:
+                callback_query_id: "{{ callback_id }}"
+                message: "Открываю…"
+                show_alert: false
+
+            - action: domonap.open_relay_by_door_id
+              data:
+                door_id: "{{ incoming_door_id }}"
+                config_entry_id: "{{ incoming_entry_id }}"
+
+            - action: telegram_bot.edit_replymarkup
+              data:
+                chat_id: "{{ chat_id }}"
+                message_id: "{{ message_id }}"
+                inline_keyboard: []
+
+        # Ignore an incoming call without opening the door.
+        - conditions:
+            - condition: template
+              value_template: >-
+                {{ event_type == 'telegram_callback'
+                   and command == '/dn:ignore' }}
+          sequence:
+            - action: telegram_bot.answer_callback_query
+              data:
+                callback_query_id: "{{ callback_id }}"
+                message: "Не открываю"
+                show_alert: false
+
+            - action: telegram_bot.edit_replymarkup
+              data:
+                chat_id: "{{ chat_id }}"
+                message_id: "{{ message_id }}"
+                inline_keyboard: []
+
+
+- alias: "Domonap Incoming Call to Telegram"
+  id: domonap_incoming_call_telegram_example
+  mode: parallel
+  max: 10
+
+  triggers:
+    - trigger: event
+      event_type: domonap_incoming_call
+
+  variables:
+    photo_url: >-
+      {{ trigger.event.data.get('PhotoUrl')
+         or trigger.event.data.get('photoUrl')
+         or trigger.event.data.get('VideoPreview')
+         or '' }}
+
+    address: >-
+      {{ trigger.event.data.get('Address', 'Домофон') }}
+
+    door_id: >-
+      {{ trigger.event.data.get('DoorId', '') }}
+
+    # Panel runtime adds this field. Keep it together with DoorId all the way
+    # to the final service call when multiple accounts are configured.
+    config_entry_id: >-
+      {{ trigger.event.data.get('config_entry_id', '') }}
+
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ door_id | length > 0
+           and config_entry_id | length > 0 }}
+
+  actions:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ photo_url | length > 0 }}"
+          sequence:
+            - action: telegram_bot.send_photo
+              data:
+                chat_id: !secret domonap_telegram_chat_id
+                message_thread_id: !secret domonap_telegram_thread_id
+                url: "{{ photo_url }}"
+                parse_mode: html
+                caption: |-
+                  📞 <b>Звонок в домофон</b>
+                  📍 {{ address }}
+                inline_keyboard:
+                  - "🔓 Открыть:/dn:o:{{ config_entry_id }}:{{ door_id }}"
+                  - "❌ Не открывать:/dn:ignore"
+
+      default:
+        - action: telegram_bot.send_message
+          data:
+            chat_id: !secret domonap_telegram_chat_id
+            message_thread_id: !secret domonap_telegram_thread_id
+            parse_mode: html
+            message: |-
+              📞 <b>Звонок в домофон</b>
+              📍 {{ address }}
+            inline_keyboard:
+              - "🔓 Открыть:/dn:o:{{ config_entry_id }}:{{ door_id }}"
+              - "❌ Не открывать:/dn:ignore"

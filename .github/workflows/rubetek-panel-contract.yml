@@ -1,0 +1,27 @@
+name: Rubetek panel contract
+
+on:
+  push:
+    branches:
+      - rubetek-panel-auth
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install aiohttp
+      - name: Compile integration
+        run: python -m compileall -q custom_components/domonap
+      - name: Run panel API contract tests
+        run: python test/test_panel_api.py -v
+      - name: Run external SIP contract tests
+        run: python test/test_external_sip.py -v
+      - name: Run panel SIP lifecycle tests
+        run: python test/test_panel_sip_lifecycle.py -v

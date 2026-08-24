@@ -7,10 +7,24 @@
     "error": {
       "confirmation_failed": "Ошибка подтверждения",
       "authorization_failed": "Ошибка аутентификации",
+      "invalid_panel_code": "Код панели должен содержать 8 цифр",
+      "panel_confirmation_failed": "Не удалось активировать Rubetek-панель",
+      "invalid_panel_session": "Данные существующей panel-сессии неверны или не содержат роль Panel",
       "unknown": "Неизвестная ошибка"
     },
     "step": {
       "user": {
+        "title": "Тип авторизации",
+        "description": "Выберите профиль Domonap. Старый вариант по номеру телефона остаётся без изменений; Rubetek Panel использует отдельный профиль авторизации.",
+        "data": {
+          "auth_mode": "Профиль авторизации"
+        },
+        "data_description": {
+          "auth_mode": "phone — номер телефона + SMS; panel — Rubetek/AOSP панель"
+        }
+      },
+      "phone": {
+        "title": "Вход по номеру телефона",
         "data": {
           "country_code": "Код страны",
           "phone_number": "Номер телефона"
@@ -21,9 +35,74 @@
           "confirm_code": "Код подтверждения"
         }
       },
+      "panel_setup": {
+        "title": "Настройка Rubetek-панели",
+        "description": "Новый 8-значный код активации можно запросить через поддержку в официальном приложении Domonap. Код обменивается на panel-сессию один раз. Если панель уже активирована, можно импортировать сохранённую сессию без повторного использования кода.",
+        "data": {
+          "panel_setup_mode": "Способ настройки"
+        }
+      },
+      "panel": {
+        "title": "Активация Rubetek-панели",
+        "description": "Введите 8-значный код активации панели, полученный через поддержку Domonap. Код используется только для получения panel-сессии и не сохраняется в Home Assistant.",
+        "data": {
+          "confirm_code": "Код активации панели"
+        }
+      },
+      "panel_session": {
+        "title": "Импорт существующей panel-сессии",
+        "description": "Вставьте JSON с instanceId, deviceInfo, panel и completeToken. Активационный код для этого не используется. Не публикуйте этот JSON: он содержит учётные данные.",
+        "data": {
+          "panel_session": "JSON panel-сессии"
+        }
+      },
       "reauth_confirm": {
         "title": "Повторная авторизация",
         "description": "Для интеграции Domonap необходимо повторно подтвердить авторизацию. После продолжения код подтверждения будет отправлен на сохраненный номер телефона."
+      }
+    }
+  },
+  "options": {
+    "abort": {
+      "external_sip_panel_only": "Переадресация звонков по SIP доступна только для профиля Rubetek Panel"
+    },
+    "error": {
+      "external_sip_user_required": "Укажите SIP User",
+      "external_sip_domain_required": "Укажите SIP domain",
+      "external_sip_domain_invalid": "SIP domain должен иметь вид host или host:port",
+      "external_sip_number_required": "Укажите номер, на который звонить"
+    },
+    "step": {
+      "init": {
+        "title": "Внешний SIP / Asterisk",
+        "description": "При включении Home Assistant регистрируется на указанном SIP-сервере и при входящем вызове Domonap звонит на заданный номер. Home Assistant мостит только SIP-сигнализацию: исходный SDP Domonap передаётся Asterisk без изменения, а SDP-ответ Asterisk передаётся обратно Domonap без изменения. RTP идёт напрямую между Domonap и Asterisk; NAT, RTP и транскодирование должны быть настроены на Asterisk. DTMF 1 принимается как SIP INFO. Успешное открытие двери через DTMF, Home Assistant или Telegram завершает текущий вызов на обоих SIP-плечах. Если внешний SIP абонент кладёт трубку без открытия двери, интеграция завершает оставшийся Domonap-вызов. Сейчас поддерживается UDP. SIP-функциональность экспериментальная.",
+        "data": {
+          "external_sip_enabled": "Принимать звонки домофона на SIP",
+          "external_sip_user": "SIP User",
+          "external_sip_password": "SIP Password",
+          "external_sip_domain": "SIP domain",
+          "external_sip_transport": "Transport",
+          "external_sip_call_number": "Номер для звонка"
+        },
+        "data_description": {
+          "external_sip_domain": "Например: 192.168.10.1:5060",
+          "external_sip_transport": "Сейчас поддерживается UDP",
+          "external_sip_call_number": "Например: 100; для DTMF 1 настройте SIP leg к Home Assistant на dtmf_mode=info"
+        }
+      }
+    }
+  },
+  "selector": {
+    "auth_mode": {
+      "options": {
+        "phone": "Номер телефона + SMS",
+        "panel": "Rubetek Panel"
+      }
+    },
+    "panel_setup_mode": {
+      "options": {
+        "activation_code": "Новый 8-значный код активации",
+        "existing_session": "Существующая активированная сессия"
       }
     }
   },
