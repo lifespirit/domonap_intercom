@@ -23,3 +23,5 @@ jobs:
         run: python test/test_panel_api.py -v
       - name: Run external SIP contract tests
         run: python test/test_external_sip.py -v
+      - name: Run panel SIP lifecycle tests
+        run: python test/test_panel_sip_lifecycle.py -v
