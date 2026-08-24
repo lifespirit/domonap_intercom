@@ -94,6 +94,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .panel_api import RubetekPanelIntercomAPI
     from .panel_runtime_consumer import RubetekPanelRuntimeConsumer
     from .panel_call_controller import PanelCallController
+    from .util import migrate_panel_entity_unique_ids
 
     hass.data[DOMAIN].setdefault(entry.entry_id, {})
 
@@ -141,6 +142,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if new_data != entry.data:
         hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # Scope registry unique IDs before platforms are loaded. This preserves the
+    # current entity_id names while making duplicate DoorId/KeyId/camera ids from
+    # multiple Rubetek accounts legal in Home Assistant.
+    if auth_mode == AUTH_MODE_PANEL:
+        migrate_panel_entity_unique_ids(hass, entry)
 
     api.set_tokens(
         new_data.get(PARAM_ACCESS_TOKEN),
@@ -199,6 +206,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         call_controller = PanelCallController(
             hass,
             api,
+            config_entry_id=entry.entry_id,
             enabled=options.get(OPT_EXTERNAL_SIP_ENABLED, False),
             user=options.get(OPT_EXTERNAL_SIP_USER, ""),
             password=options.get(OPT_EXTERNAL_SIP_PASSWORD, ""),
