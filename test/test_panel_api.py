@@ -138,6 +138,80 @@ class RubetekPanelApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["ok"], False)
         self.assertEqual(opened, [])
 
+    async def test_panel_notify_call_ended_matches_apk_contract(self):
+        api = RubetekPanelIntercomAPI(instance_id="0123456789abcdef")
+        calls = []
+
+        async def fake_post(path, payload=None, **kwargs):
+            calls.append((path, payload, kwargs))
+            return ""
+
+        api._post = fake_post
+        result = await api.end_call_notify("call-123")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][0], "/communication-api/Call/NotifyCallEnded")
+        self.assertEqual(calls[0][1], {"callId": "call-123"})
+        self.assertTrue(calls[0][2]["need_auth"])
+        self.assertEqual(calls[0][2]["expect"], "text")
+
+    async def test_panel_end_active_call_notifies_backend_even_when_sip_succeeds(self):
+        api = RubetekPanelIntercomAPI(instance_id="0123456789abcdef")
+        api.set_active_call("call-123")
+        notified = []
+
+        class FakeSipCall:
+            has_invite = True
+            registered = True
+
+            async def end(self, timeout=5.0):
+                return {"ok": True, "method": "sip_decline", "timeout": timeout}
+
+            async def stop(self):
+                return None
+
+        async def fake_notify(call_id):
+            notified.append(call_id)
+            return {"ok": True, "body": ""}
+
+        api._active_sip_call = FakeSipCall()
+        api.end_call_notify = fake_notify
+
+        result = await api.end_active_call()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(notified, ["call-123"])
+        self.assertTrue(result["notify"]["ok"])
+        self.assertTrue(result["sip"]["ok"])
+        self.assertIsNone(api.active_call_id)
+
+    async def test_panel_end_active_call_does_not_wait_for_missing_invite(self):
+        api = RubetekPanelIntercomAPI(instance_id="0123456789abcdef")
+        api.set_active_call("call-123")
+
+        class FakeSipCall:
+            has_invite = False
+            registered = True
+
+            async def end(self, timeout=5.0):
+                raise AssertionError("SIP end must not be awaited without INVITE")
+
+            async def stop(self):
+                return None
+
+        async def fake_notify(call_id):
+            return {"ok": True, "body": ""}
+
+        api._active_sip_call = FakeSipCall()
+        api.end_call_notify = fake_notify
+
+        result = await api.end_active_call()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["notify"]["ok"])
+        self.assertEqual(result["sip"]["reason"], "no_sip_invite")
+        self.assertIsNone(api.active_call_id)
+
     def test_existing_session_import_restores_exact_identity(self):
         session = {
             "instanceId": "0123456789abcdef",
