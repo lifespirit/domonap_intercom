@@ -75,7 +75,7 @@
     "step": {
       "init": {
         "title": "External SIP / Asterisk",
-        "description": "When enabled, Home Assistant registers on the configured SIP server and calls the configured number for each incoming Domonap call. After answer, audio is proxied between Domonap and the external SIP leg. DTMF 1 opens the door without ending the conversation. Opening the door from Home Assistant/Telegram also keeps the call alive while the external SIP leg is active. The Domonap call ends when the external SIP party hangs up. UDP is currently supported.",
+        "description": "When enabled, Home Assistant registers on the configured SIP server and calls the configured number for each incoming Domonap call. Home Assistant bridges SIP signaling only: the original Domonap SDP offer is sent to Asterisk unchanged and Asterisk's SDP answer is sent back to Domonap unchanged. RTP flows directly between Domonap and Asterisk; NAT, RTP handling and transcoding belong on Asterisk. DTMF 1 is accepted as SIP INFO, opens the door and keeps the conversation active. Opening the door from Home Assistant/Telegram during an established external call also keeps the call active. The Domonap call ends when the external SIP party hangs up. UDP is currently supported.",
         "data": {
           "external_sip_enabled": "Receive intercom calls on SIP",
           "external_sip_user": "SIP User",
@@ -87,7 +87,7 @@
         "data_description": {
           "external_sip_domain": "For example: 192.168.10.1:5060",
           "external_sip_transport": "UDP is supported in the first implementation",
-          "external_sip_call_number": "For example: 100"
+          "external_sip_call_number": "For example: 100; configure the SIP leg toward Home Assistant with dtmf_mode=info for DTMF 1"
         }
       }
     }
