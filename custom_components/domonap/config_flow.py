@@ -1,4 +1,5 @@
 from homeassistant import config_entries
+from homeassistant.core import callback
 import voluptuous as vol
 import re
 from secrets import token_urlsafe
@@ -26,8 +27,16 @@ from .const import (
     PARAM_PANEL_USER_ID,
     PARAM_PANEL_NAME,
     PARAM_PANEL_DEVICE_INFO,
+    OPT_EXTERNAL_SIP_ENABLED,
+    OPT_EXTERNAL_SIP_USER,
+    OPT_EXTERNAL_SIP_PASSWORD,
+    OPT_EXTERNAL_SIP_DOMAIN,
+    OPT_EXTERNAL_SIP_TRANSPORT,
+    OPT_EXTERNAL_SIP_CALL_NUMBER,
+    EXTERNAL_SIP_TRANSPORT_UDP,
 )
 from .api import IntercomAPI, is_android_guid
+from .external_sip import parse_host_port
 from .panel_api import RubetekPanelIntercomAPI
 
 
@@ -44,6 +53,11 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self._api = IntercomAPI()
         self._reauth_entry = None
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        return IntercomOptionsFlow(config_entry)
+
     async def async_step_reauth(self, entry_data: dict[str, Any]):
         self._reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
@@ -53,7 +67,6 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if self._auth_mode == AUTH_MODE_PANEL:
             return await self.async_step_panel_setup()
 
-        # Legacy phone/SMS reauth path stays behavior-compatible with main.
         self._country_code = entry_data.get(CONF_COUNTRY_CODE)
         self._phone_number = entry_data.get(CONF_PHONE_NUMBER)
         stored_device_token = entry_data.get(PARAM_DEVICE_TOKEN)
@@ -301,8 +314,73 @@ class IntercomFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 PARAM_PANEL_NAME: self._api.panel.get("name"),
             }
         )
-        # Panel provisioning has no mobile push token or phone identity.
         data.pop(PARAM_DEVICE_TOKEN, None)
         data.pop(CONF_COUNTRY_CODE, None)
         data.pop(CONF_PHONE_NUMBER, None)
         return data
+
+
+class IntercomOptionsFlow(config_entries.OptionsFlow):
+    """Options that change runtime behavior but not Domonap authorization."""
+
+    def __init__(self, config_entry):
+        self._config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        if self._config_entry.data.get(PARAM_AUTH_MODE, AUTH_MODE_PHONE) != AUTH_MODE_PANEL:
+            return self.async_abort(reason="external_sip_panel_only")
+
+        options = self._config_entry.options
+        errors = {}
+        if user_input is not None:
+            enabled = bool(user_input.get(OPT_EXTERNAL_SIP_ENABLED, False))
+            if enabled:
+                if not user_input.get(OPT_EXTERNAL_SIP_USER, "").strip():
+                    errors["base"] = "external_sip_user_required"
+                elif not user_input.get(OPT_EXTERNAL_SIP_DOMAIN, "").strip():
+                    errors["base"] = "external_sip_domain_required"
+                elif not user_input.get(OPT_EXTERNAL_SIP_CALL_NUMBER, "").strip():
+                    errors["base"] = "external_sip_number_required"
+                else:
+                    try:
+                        parse_host_port(user_input[OPT_EXTERNAL_SIP_DOMAIN])
+                    except (TypeError, ValueError):
+                        errors["base"] = "external_sip_domain_invalid"
+            if not errors:
+                return self.async_create_entry(title="", data=dict(user_input))
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    OPT_EXTERNAL_SIP_ENABLED,
+                    default=options.get(OPT_EXTERNAL_SIP_ENABLED, False),
+                ): bool,
+                vol.Optional(
+                    OPT_EXTERNAL_SIP_USER,
+                    default=options.get(OPT_EXTERNAL_SIP_USER, ""),
+                ): str,
+                vol.Optional(
+                    OPT_EXTERNAL_SIP_PASSWORD,
+                    default=options.get(OPT_EXTERNAL_SIP_PASSWORD, ""),
+                ): str,
+                vol.Optional(
+                    OPT_EXTERNAL_SIP_DOMAIN,
+                    default=options.get(OPT_EXTERNAL_SIP_DOMAIN, ""),
+                ): str,
+                vol.Optional(
+                    OPT_EXTERNAL_SIP_TRANSPORT,
+                    default=options.get(
+                        OPT_EXTERNAL_SIP_TRANSPORT, EXTERNAL_SIP_TRANSPORT_UDP
+                    ),
+                ): vol.In([EXTERNAL_SIP_TRANSPORT_UDP]),
+                vol.Optional(
+                    OPT_EXTERNAL_SIP_CALL_NUMBER,
+                    default=options.get(OPT_EXTERNAL_SIP_CALL_NUMBER, ""),
+                ): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+        )
