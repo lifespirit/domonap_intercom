@@ -56,15 +56,24 @@ def _select_entry_id(hass: HomeAssistant, requested_entry_id: str | None) -> str
             else None
         )
 
-    # Proxy objects also live in hass.data[DOMAIN]; select an actual config entry.
-    return next(
-        (
-            entry_id
-            for entry_id, entry_data in domain_data.items()
-            if isinstance(entry_data, dict) and entry_data.get(API) is not None
-        ),
-        None,
-    )
+    # Proxy objects also live in hass.data[DOMAIN]. Among real config entries,
+    # prefer the session that currently owns an incoming call. This makes
+    # door-opening actions deterministic in a phone + panel setup without
+    # changing the legacy fallback when no call is active.
+    config_entries = [
+        (entry_id, entry_data)
+        for entry_id, entry_data in domain_data.items()
+        if isinstance(entry_data, dict) and entry_data.get(API) is not None
+    ]
+    active_entries = [
+        entry_id
+        for entry_id, entry_data in config_entries
+        if getattr(entry_data.get(API), "active_call_id", None)
+    ]
+    if len(active_entries) == 1:
+        return active_entries[0]
+
+    return config_entries[0][0] if config_entries else None
 
 
 def _find_last_call_sensor_entity_id(hass: HomeAssistant, entry_id: str | None) -> str | None:
