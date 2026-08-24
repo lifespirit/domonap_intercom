@@ -3,12 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import socket
 import time
 from secrets import token_hex
 from typing import Any
 
-from .external_sip import AudioSdp, parse_audio_sdp
 from .sip import DomonapSipCall, _SipMessage
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,9 +17,9 @@ _SIP_URI_RE = re.compile(r"<(sips?:[^>]+)>|(sips?:[^;,\s]+)", re.IGNORECASE)
 class RubetekPanelSipCall(DomonapSipCall):
     """Panel SIP leg with the answer -> open -> BYE lifecycle used by the APK.
 
-    The generic DomonapSipCall from main is intentionally left untouched. The
-    panel class additionally exposes its SDP/RTP leg so an optional external SIP
-    call can be bridged through Home Assistant without changing phone/SMS mode.
+    The generic DomonapSipCall from main is intentionally left untouched.  For
+    optional Asterisk forwarding this class exposes the original SDP offer and
+    accepts an externally supplied SDP answer.  It never proxies RTP itself.
     """
 
     def __init__(self, account: str, password: str, domain: str, port: int) -> None:
@@ -31,8 +29,6 @@ class RubetekPanelSipCall(DomonapSipCall):
         self._bye_response_event = asyncio.Event()
         self._bye_response_status: int | None = None
         self._bye_cseq = 1
-        self._media_sockets: list[socket.socket] = []
-        self._audio_offer_cache: AudioSdp | None = None
 
     @property
     def answered(self) -> bool:
@@ -43,23 +39,6 @@ class RubetekPanelSipCall(DomonapSipCall):
         invite = self._invite
         return invite.body if invite is not None else b""
 
-    @property
-    def audio_offer(self) -> AudioSdp | None:
-        if self._audio_offer_cache is None and self._invite is not None:
-            self._audio_offer_cache = parse_audio_sdp(self._invite.body)
-        return self._audio_offer_cache
-
-    @property
-    def media_socket(self) -> socket.socket | None:
-        return self._media_sockets[0] if self._media_sockets else None
-
-    @property
-    def remote_media_endpoint(self) -> tuple[str, int] | None:
-        audio = self.audio_offer
-        if audio is None:
-            return None
-        return audio.host, audio.port
-
     async def wait_for_invite(self, timeout: float = 8.0) -> bool:
         self.start()
         try:
@@ -68,26 +47,62 @@ class RubetekPanelSipCall(DomonapSipCall):
             return False
         return self._invite is not None
 
-    async def stop(self) -> None:
-        for media_socket in self._media_sockets:
-            try:
-                media_socket.close()
-            except Exception:
-                pass
-        self._media_sockets.clear()
-        await super().stop()
-
     async def answer(
         self,
         timeout: float = 2.0,
         *,
         direction: str = "recvonly",
     ) -> dict[str, Any]:
-        """Accept the pending INVITE.
+        """Accept the pending INVITE without setting up an RTP endpoint.
 
-        ``recvonly`` preserves the old no-audio Home Assistant behavior. The
-        Asterisk bridge uses ``sendrecv`` and then relays RTP in both directions.
+        This path is used when external SIP forwarding is disabled.  The call is
+        answered only so the relay-open flow can reproduce the panel lifecycle,
+        then it is immediately terminated.  SDP therefore advertises discard
+        port 9 instead of opening a media socket in Home Assistant.
         """
+        invite = await self._wait_invite(timeout)
+        if isinstance(invite, dict):
+            return invite
+        if self._answered:
+            return self._already_answered_result()
+        if direction not in ("recvonly", "sendrecv", "inactive"):
+            raise ValueError(f"Unsupported SIP media direction: {direction}")
+
+        body = self._build_no_media_sdp_answer(invite, direction=direction)
+        return await self._answer_with_body(invite, body, description=direction)
+
+    async def answer_with_sdp(
+        self,
+        sdp_answer: bytes | str,
+        *,
+        timeout: float = 2.0,
+    ) -> dict[str, Any]:
+        """Accept the Domonap INVITE with Asterisk's SDP answer unchanged.
+
+        No RTP address, port, payload type or codec is rewritten here.  Asterisk
+        is therefore the media endpoint visible to Domonap and is responsible
+        for RTP/NAT/transcoding toward the final extension.
+        """
+        invite = await self._wait_invite(timeout)
+        if isinstance(invite, dict):
+            return invite
+        if self._answered:
+            return self._already_answered_result()
+
+        body = sdp_answer.encode() if isinstance(sdp_answer, str) else bytes(sdp_answer)
+        if not body:
+            return {
+                "ok": False,
+                "error": "external_sip_answer_has_no_sdp",
+                "registered": self.registered,
+            }
+        return await self._answer_with_body(
+            invite,
+            body,
+            description="external-sdp-pass-through",
+        )
+
+    async def _wait_invite(self, timeout: float) -> _SipMessage | dict[str, Any]:
         self.start()
         try:
             await asyncio.wait_for(self._invite_event.wait(), timeout=timeout)
@@ -97,29 +112,26 @@ class RubetekPanelSipCall(DomonapSipCall):
                 "error": "sip_invite_timeout",
                 "registered": self.registered,
             }
-
-        invite = self._invite
-        if invite is None:
+        if self._invite is None:
             return {
                 "ok": False,
                 "error": "sip_invite_missing",
                 "registered": self.registered,
             }
-        if self._answered:
-            return {
-                "ok": True,
-                "method": "sip_answer",
-                "already_answered": True,
-                "ack": self._ack_event.is_set(),
-            }
-        if direction not in ("recvonly", "sendrecv"):
-            raise ValueError(f"Unsupported SIP media direction: {direction}")
+        return self._invite
 
-        body = self._build_sdp_answer(invite, direction=direction)
+    async def _answer_with_body(
+        self,
+        invite: _SipMessage,
+        body: bytes,
+        *,
+        description: str,
+    ) -> dict[str, Any]:
         await self._send_invite_ok(invite, body)
         self._answered = True
         _LOGGER.info(
-            "Domonap panel SIP INVITE answered with 200 OK direction=%s", direction
+            "Domonap panel SIP INVITE answered with 200 OK mode=%s",
+            description,
         )
 
         try:
@@ -131,7 +143,15 @@ class RubetekPanelSipCall(DomonapSipCall):
             "ok": True,
             "method": "sip_answer",
             "ack": self._ack_event.is_set(),
-            "direction": direction,
+            "mode": description,
+        }
+
+    def _already_answered_result(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "method": "sip_answer",
+            "already_answered": True,
+            "ack": self._ack_event.is_set(),
         }
 
     async def end(self, timeout: float = 2.0) -> dict[str, Any]:
@@ -274,11 +294,19 @@ class RubetekPanelSipCall(DomonapSipCall):
         await self._send(f"BYE {remote_target} SIP/2.0", headers)
         self._bye_cseq += 1
 
-    def _build_sdp_answer(self, invite: _SipMessage, *, direction: str) -> bytes:
-        """Build a minimal audio-only SDP answer for the incoming offer."""
+    def _build_no_media_sdp_answer(
+        self,
+        invite: _SipMessage,
+        *,
+        direction: str,
+    ) -> bytes:
+        """Build an audio answer using the discard port instead of an RTP socket."""
         offer = invite.body.decode("utf-8", errors="replace")
-        lines = [line.strip() for line in offer.replace("\r", "").split("\n") if line.strip()]
-
+        lines = [
+            line.strip()
+            for line in offer.replace("\r", "").split("\n")
+            if line.strip()
+        ]
         host = self._local_host
         addr_type = "IP6" if ":" in host else "IP4"
         stamp = int(time.time() * 1000)
@@ -307,16 +335,11 @@ class RubetekPanelSipCall(DomonapSipCall):
             media, _remote_port, proto, *formats = parts
             plain_rtp = proto.upper() in ("RTP/AVP", "RTP/AVPF")
             if media.lower() == "audio" and plain_rtp and not audio_accepted:
-                media_socket = self._allocate_media_socket(host)
-                port = int(media_socket.getsockname()[1])
-                self._media_sockets.append(media_socket)
-                answer.append(f"m=audio {port} {proto} {' '.join(formats)}")
+                answer.append(f"m=audio 9 {proto} {' '.join(formats)}")
                 answer.append(f"c=IN {addr_type} {host}")
                 for attribute in section[1:]:
                     lower = attribute.lower()
                     if lower.startswith(("a=rtpmap:", "a=fmtp:", "a=rtcp-fb:")):
-                        answer.append(attribute)
-                    elif lower == "a=rtcp-mux":
                         answer.append(attribute)
                 answer.append(f"a={direction}")
                 audio_accepted = True
@@ -329,17 +352,6 @@ class RubetekPanelSipCall(DomonapSipCall):
             _LOGGER.warning("Panel SIP offer has no supported plain RTP audio stream")
 
         return ("\r\n".join(answer) + "\r\n").encode("utf-8")
-
-    @staticmethod
-    def _allocate_media_socket(host: str) -> socket.socket:
-        family = socket.AF_INET6 if ":" in host else socket.AF_INET
-        media_socket = socket.socket(family, socket.SOCK_DGRAM)
-        media_socket.setblocking(False)
-        if family == socket.AF_INET6:
-            media_socket.bind((host, 0, 0, 0))
-        else:
-            media_socket.bind((host, 0))
-        return media_socket
 
     @staticmethod
     def _extract_uri(value: str | None) -> str | None:
