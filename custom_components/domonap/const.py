@@ -6,6 +6,7 @@ import voluptuous as vol
 
 DOMAIN = 'domonap'
 API = "api"
+CALL_CONTROLLER = "call_controller"
 CONF_COUNTRY_CODE = "country_code"
 CONF_PHONE_NUMBER = "phone_number"
 CONF_CONFIRM_CODE = "confirm_code"
@@ -28,6 +29,15 @@ PARAM_AUTH_MODE = "auth_mode"
 PARAM_PANEL_USER_ID = "panel_user_id"
 PARAM_PANEL_NAME = "panel_name"
 PARAM_PANEL_DEVICE_INFO = "panel_device_info"
+
+OPT_EXTERNAL_SIP_ENABLED = "external_sip_enabled"
+OPT_EXTERNAL_SIP_USER = "external_sip_user"
+OPT_EXTERNAL_SIP_PASSWORD = "external_sip_password"
+OPT_EXTERNAL_SIP_DOMAIN = "external_sip_domain"
+OPT_EXTERNAL_SIP_TRANSPORT = "external_sip_transport"
+OPT_EXTERNAL_SIP_CALL_NUMBER = "external_sip_call_number"
+EXTERNAL_SIP_TRANSPORT_UDP = "udp"
+
 EVENT_INCOMING_CALL = "domonap_incoming_call"
 EVENT_CALL_ANSWERED = "domonap_call_answered"
 EVENT_CALL_ENDED = "domonap_call_ended"
