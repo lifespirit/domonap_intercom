@@ -36,7 +36,7 @@ class _SipMessage:
 
 
 class DomonapSipCall:
-    """Minimal SIP/TCP client used only to terminate an incoming intercom call."""
+    """SIP/TCP client for an incoming intercom call."""
 
     def __init__(self, account: str, password: str, domain: str, port: int) -> None:
         self._account = account
@@ -62,6 +62,11 @@ class DomonapSipCall:
         self._expires = 300
         self._auth: dict[str, str] | None = None
         self._auth_header = "Authorization"
+        self._register_response_event = asyncio.Event()
+        self._register_response: _SipMessage | None = None
+        self._pending_register_cseq: int | None = None
+        self._destroy_lock = asyncio.Lock()
+        self._destroyed = False
 
     @property
     def registered(self) -> bool:
@@ -71,9 +76,27 @@ class DomonapSipCall:
     def has_invite(self) -> bool:
         return self._invite is not None
 
+    @property
+    def sdp_offer(self) -> bytes:
+        """Return the SDP body from the pending INVITE."""
+        invite = self._invite
+        return invite.body if invite is not None else b""
+
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="domonap_sip_call")
+
+    async def wait_for_invite(self, timeout: float = 8.0) -> bool:
+        """Wait until an incoming INVITE is available."""
+        return await self._wait_for_invite_event(timeout) and self._invite is not None
+
+    async def _wait_for_invite_event(self, timeout: float) -> bool:
+        self.start()
+        try:
+            await asyncio.wait_for(self._invite_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
 
     async def stop(self) -> None:
         self._stopping = True
@@ -98,10 +121,7 @@ class DomonapSipCall:
 
     async def end(self, timeout: float = 5.0) -> dict[str, Any]:
         """Reject the pending INVITE, which is the SIP equivalent of ending it."""
-        self.start()
-        try:
-            await asyncio.wait_for(self._invite_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        if not await self._wait_for_invite_event(timeout):
             return {
                 "ok": False,
                 "error": "sip_invite_timeout",
@@ -120,6 +140,149 @@ class DomonapSipCall:
         except Exception as err:
             _LOGGER.warning("Failed to end Domonap call via SIP: %s", err)
             return {"ok": False, "error": str(err), "registered": self.registered}
+
+    async def unregister(self, timeout: float = 2.0) -> dict[str, Any]:
+        """Remove the current SIP registration with ``Expires: 0``."""
+        if not self.registered:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "not_registered",
+                "method": "sip_unregister",
+            }
+        if self._writer is None:
+            return {
+                "ok": False,
+                "error": "sip_connection_closed_before_unregister",
+                "method": "sip_unregister",
+            }
+
+        response: _SipMessage | None = None
+        for attempt in range(2):
+            start_line, headers, cseq = self._build_register_request(expires=0)
+            self._pending_register_cseq = cseq
+            self._register_response = None
+            self._register_response_event.clear()
+
+            _LOGGER.info("Domonap SIP UNREGISTER sent (CSeq=%s)", cseq)
+            await self._send(start_line, headers)
+            try:
+                await asyncio.wait_for(
+                    self._register_response_event.wait(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Domonap SIP UNREGISTER response timeout")
+                return {
+                    "ok": False,
+                    "error": "sip_unregister_response_timeout",
+                    "method": "sip_unregister",
+                }
+
+            response = self._register_response
+            if response is None:
+                return {
+                    "ok": False,
+                    "error": "sip_unregister_response_missing",
+                    "method": "sip_unregister",
+                }
+
+            status = self._status_code(response)
+            if status in (401, 407) and attempt == 0:
+                try:
+                    self._apply_auth_challenge(response)
+                except RuntimeError:
+                    return {
+                        "ok": False,
+                        "status": status,
+                        "error": "sip_unregister_auth_challenge_missing",
+                        "method": "sip_unregister",
+                    }
+                continue
+
+            ok = 200 <= status < 300
+            if ok:
+                self._registered_event.clear()
+                _LOGGER.info("Domonap SIP registration removed with %s", status)
+            else:
+                _LOGGER.warning("Domonap SIP UNREGISTER failed with %s", status)
+            return {
+                "ok": ok,
+                "status": status,
+                "method": "sip_unregister",
+            }
+
+        status = self._status_code(response) if response is not None else 0
+        return {
+            "ok": False,
+            "status": status,
+            "method": "sip_unregister",
+        }
+
+    async def destroy(
+        self,
+        *,
+        timeout: float = 2.0,
+        terminate_dialog: bool = True,
+        reason: str = "call_end",
+    ) -> dict[str, Any]:
+        """Terminate the dialog, unregister the account and close SIP."""
+        async with self._destroy_lock:
+            if self._destroyed:
+                return {
+                    "ok": True,
+                    "already_destroyed": True,
+                    "method": "sip_destroy",
+                }
+
+            _LOGGER.info(
+                "Destroying Domonap SIP session reason=%s invite=%s registered=%s",
+                reason,
+                self.has_invite,
+                self.registered,
+            )
+
+            terminate_result: dict[str, Any] | None = None
+            if terminate_dialog and self.has_invite and not self._ended:
+                try:
+                    terminate_result = await self.end(timeout=timeout)
+                except Exception as err:
+                    _LOGGER.warning("SIP dialog termination failed: %s", err)
+                    terminate_result = {"ok": False, "error": str(err)}
+
+            try:
+                unregister_result = await self.unregister(timeout=timeout)
+            except Exception as err:
+                _LOGGER.warning("SIP unregister failed: %s", err)
+                unregister_result = {"ok": False, "error": str(err)}
+
+            await self.stop()
+            self._destroyed = True
+            self._invite = None
+            self._invite_event.set()
+
+            terminate_ok = (
+                terminate_result is None
+                or (
+                    isinstance(terminate_result, dict)
+                    and terminate_result.get("ok") is True
+                )
+            )
+            unregister_ok = (
+                isinstance(unregister_result, dict)
+                and unregister_result.get("ok") is True
+            )
+            result = {
+                "ok": terminate_ok and unregister_ok,
+                "method": "sip_destroy",
+                "terminate": terminate_result,
+                "unregister": unregister_result,
+            }
+            _LOGGER.info(
+                "Domonap SIP session destroyed terminate_ok=%s unregister_ok=%s",
+                terminate_ok,
+                unregister_ok,
+            )
+            return result
 
     async def _run(self) -> None:
         try:
@@ -160,16 +323,7 @@ class DomonapSipCall:
                 continue
             status = self._status_code(response)
             if status in (401, 407):
-                challenge_name = (
-                    "www-authenticate" if status == 401 else "proxy-authenticate"
-                )
-                challenge = response.first(challenge_name)
-                if not challenge:
-                    raise RuntimeError("SIP authentication challenge is missing")
-                self._auth = self._parse_digest(challenge)
-                self._auth_header = (
-                    "Authorization" if status == 401 else "Proxy-Authorization"
-                )
+                self._apply_auth_challenge(response)
                 await self._send_register()
                 continue
             if 200 <= status < 300:
@@ -190,6 +344,15 @@ class DomonapSipCall:
 
     async def _handle_message(self, message: _SipMessage) -> None:
         if message.start_line.startswith("SIP/2.0"):
+            cseq = message.first("cseq") or ""
+            if cseq.upper().endswith(" REGISTER"):
+                try:
+                    response_cseq = int(cseq.split(None, 1)[0])
+                except (ValueError, IndexError):
+                    response_cseq = -1
+                if response_cseq == self._pending_register_cseq:
+                    self._register_response = message
+                    self._register_response_event.set()
             return
         method = message.start_line.split(" ", 1)[0].upper()
         if method == "INVITE":
@@ -214,8 +377,13 @@ class DomonapSipCall:
         elif method == "OPTIONS":
             await self._send_response(message, 200, "OK", add_to_tag=True)
 
-    async def _send_register(self) -> None:
+    def _build_register_request(
+        self, *, expires: int | None = None
+    ) -> tuple[str, list[str], int]:
+        """Build a REGISTER request shared by registration and teardown."""
         self._cseq += 1
+        cseq = self._cseq
+        expiry = self._expires if expires is None else expires
         branch = f"z9hG4bK{token_hex(12)}"
         host = self._format_host(self._local_host)
         request_uri = f"sip:{self._domain}:{self._port}"
@@ -227,16 +395,20 @@ class DomonapSipCall:
             f"From: <{identity}>;tag={self._from_tag}",
             f"To: <{identity}>",
             f"Call-ID: {self._register_call_id}",
-            f"CSeq: {self._cseq} REGISTER",
-            f"Contact: <{contact}>;expires={self._expires}",
-            f"Expires: {self._expires}",
+            f"CSeq: {cseq} REGISTER",
+            f"Contact: <{contact}>;expires={expiry}",
+            f"Expires: {expiry}",
             "Supported: path, outbound, gruu",
             "User-Agent: Domonap Home Assistant",
         ]
         if self._auth is not None:
             authorization = self._digest_authorization("REGISTER", request_uri)
             headers.append(f"{self._auth_header}: {authorization}")
-        await self._send(f"REGISTER {request_uri} SIP/2.0", headers)
+        return f"REGISTER {request_uri} SIP/2.0", headers, cseq
+
+    async def _send_register(self) -> None:
+        start_line, headers, _ = self._build_register_request()
+        await self._send(start_line, headers)
 
     async def _send_response(
         self,
@@ -246,6 +418,14 @@ class DomonapSipCall:
         *,
         add_to_tag: bool = False,
     ) -> None:
+        headers = self._dialog_response_headers(request, add_to_tag=add_to_tag)
+        headers.append("Server: Domonap Home Assistant")
+        await self._send(f"SIP/2.0 {status} {reason}", headers)
+
+    def _dialog_response_headers(
+        self, request: _SipMessage, *, add_to_tag: bool
+    ) -> list[str]:
+        """Copy the headers that identify a SIP dialog into a response."""
         headers: list[str] = []
         for via in request.headers.get("via", []) or request.headers.get("v", []):
             headers.append(f"Via: {via}")
@@ -256,8 +436,7 @@ class DomonapSipCall:
             if name == "to" and add_to_tag and ";tag=" not in value.lower():
                 value = f"{value};tag={self._to_tag}"
             headers.append(f"{self._display_header(name)}: {value}")
-        headers.append("Server: Domonap Home Assistant")
-        await self._send(f"SIP/2.0 {status} {reason}", headers)
+        return headers
 
     async def _send(self, start_line: str, headers: list[str], body: bytes = b"") -> None:
         writer = self._writer
@@ -339,6 +518,20 @@ class DomonapSipCall:
         if opaque := auth.get("opaque"):
             values.append(f'opaque="{opaque}"')
         return "Digest " + ", ".join(values)
+
+    def _apply_auth_challenge(self, response: _SipMessage) -> None:
+        """Update digest state from a 401 or 407 response."""
+        status = self._status_code(response)
+        challenge_name = (
+            "www-authenticate" if status == 401 else "proxy-authenticate"
+        )
+        challenge = response.first(challenge_name)
+        if not challenge:
+            raise RuntimeError("SIP authentication challenge is missing")
+        self._auth = self._parse_digest(challenge)
+        self._auth_header = (
+            "Authorization" if status == 401 else "Proxy-Authorization"
+        )
 
     @staticmethod
     def _parse_digest(value: str) -> dict[str, str]:
